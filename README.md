@@ -107,28 +107,6 @@ User
            └── Cron job: daily @ 9am
 ```
 
-### Sidebar Layout (Claude Desktop-Inspired)
-
-```
-┌──────────────────────┐
-│ Project Selector ▾   │  ← Dropdown to switch projects
-├──────────────────────┤
-│ [+ New Chat]         │  ← Full-width button
-├──────────────────────┤
-│ [🔧 Toolkits]        │  ← Full-width, stacked
-│ [⚙ Settings]         │
-├──────────────────────┤
-│ 🔍 Search chats...   │
-├──────────────────────┤
-│ Recent               │
-│ Chat 1               │  ← Rounded tiles, names only
-│ Chat 2               │     Hover highlight, 3-dot menu
-│ Chat 3  ⋮            │     (Rename, Delete)
-├──────────────────────┤
-│ [👤] Project Name    │  ← Profile menu (Dark Mode, Logout)
-└──────────────────────┘
-```
-
 ### PII Protection — 6-Layer Defense
 
 ```
@@ -140,43 +118,28 @@ System Prompt ──► Identity/Soul scrub ─────────┤
                                                ▼
                                      ┌─────────────────┐
                                      │   PII Vault     │
-                                     │  [EMAIL_1] ↔    │
+                                     │  [CLAW_TYPE_H]↔ │
                                      │  user@email.com │
                                      └────────┬────────┘
-                                              │
-                       ┌──────────────────────┼──────────────────────┐
-                       ▼                      ▼                      ▼
-              Tool Result Redact    Context Redact          System Prompt Scrub
-                       │                      │                      │
-                       └──────────────────────┼──────────────────────┘
-                                              │
-                                    ┌─────────▼─────────┐
-                                    │ Transport Shield  │
-                                    │ (Network-layer    │
-                                    │  final checkpoint)│
-                                    └─────────┬─────────┘
-                                              │
-                                    ┌─────────▼─────────┐
-                                    │  SSE Stream with  │
-                                    │  Chunk-Boundary   │
-                                    │  Buffered Restore │
-                                    └───────────────────┘
+                                               │
+                        ┌──────────────────────┼──────────────────────┐
+                        ▼                      ▼                      ▼
+               Tool Result Redact    Context Redact          System Prompt Scrub
+                        │                      │                      │
+                        └──────────────────────┼──────────────────────┘
+                                               │
+                                     ┌─────────▼─────────┐
+                                     │ Transport Shield  │
+                                     │ (Network-layer    │
+                                     │  final checkpoint)│
+                                     └─────────┬─────────┘
+                                               │
+                                     ┌─────────▼─────────┐
+                                     │  SSE Stream with  │
+                                     │  Chunk-Boundary   │
+                                     │  Buffered Restore │
+                                     └───────────────────┘
 ```
-
----
-
-## 🗄 Database Schema
-
-| Model | Table | Purpose |
-|---|---|---|
-| **User** | `user` | Auth user (Better Auth username/password) |
-| **Session** | `session` | Auth session (30-day expiry) |
-| **ComposioClawInstance** | `composio_claw_instance` | **Project** — encrypted API key, PII/gateway settings, identity prompts |
-| **Chat** | `composio_claw_chat` | **Thread** — per-chat model, compaction state, scoped messages |
-| **Message** | `composio_claw_message` | Chat messages scoped to `chatId` + `instanceId` |
-| **Memory** | `composio_claw_memory` | pgvector semantic memories (384-dim, shared within instance) |
-| **CronJob** | `composio_claw_cron_job` | Scheduled tasks (scoped to chat) |
-| **OnboardingState** | `onboarding_state` | Onboarding wizard progress |
 
 ---
 
@@ -229,12 +192,14 @@ Open [http://localhost:3000](http://localhost:3000) and complete the onboarding 
 - **Zero Local Execution:** Code runs inside Composio's sandboxes — host machine protected from prompt injection
 - **OAuth-First:** No raw service keys visible to the agent; all access through Composio OAuth brokers
 - **PII Encryption (6 Layers):**
-  1. **Structured PII Extraction** — Deep-walks JSON tool results for known fields (name, email, phone, profileUrl, URNs)
-  2. **Tool-Output Redaction** — All string values in tool results are redacted against registered PII
-  3. **Context Message Redaction** — Historical turns are fully redacted using deterministic tokens
+  1. **Structured PII Extraction** — Deep-walks JSON tool results (depth 25) matching 40+ known paths and key-name heuristics. Covers Gmail People API (`names.*.displayName`, `names.*.givenName`, `names.*.familyName`, `emailAddresses.*.value`), Calendar, Slack, and Discord schemas
+  2. **Tool-Output Redaction** — All string values in tool results redacted against registered PII. Identity registry uses `\b...\b` word boundaries to prevent substring corruption. Phone regex includes `\b` boundary and context validation to reject resource IDs. DeBERTa classifier with circuit breaker (3 failures → 120s cooldown → retry)
+  3. **Context Message Redaction** — Historical turns fully redacted using deterministic tokens; checkpoints restore tokens in tool inputs before re-execution
   4. **System Prompt Scrub** — Identity/soul prompts (which may contain user PII) are redacted
-  5. **Transport-Layer Shield** — Network-level deep-scrub of the entire compiled payload before LLM
-  6. **SSE Chunk-Boundary Restore** — Buffered transform stream ensures no `[EMAIL_1]` leaks mid-chunk; tokens restored to real values on return
+  5. **Transport-Layer Shield** — Network-level deep-scrub of the entire compiled payload before LLM, with `containsTokenPattern` safety utility for downstream consumers
+  6. **SSE Chunk-Boundary Restore** — Regex-based chunk buffer catches partial tokens at SSE boundaries for both bracket format `[CLAW_TYPE_HASH]` and email domain format `CLAW_EMAIL_hash@trustclaw.anon`; tokens restored to real values on return
+- **Token Formats:** Email addresses use domain format (`CLAW_EMAIL_A1B2@trustclaw.anon`); all other types use bracket format (`[CLAW_PERSON_NAME_C3D4]`). Both formats supported by `isTokenString`, `containsTokenPattern`, and SSE boundary buffering
+- **Canonicalization:** Case-insensitive deduplication with whitespace normalization preserves first-seen casing for restoration
 - **Project Isolation:** Each project has its own AES-256-GCM encrypted Composio API key; no shared keys, no connection leakage between projects
 - **Per-Chat Model Selection:** Each chat can use a different model (local or OpenRouter); model retained across chat switches
 

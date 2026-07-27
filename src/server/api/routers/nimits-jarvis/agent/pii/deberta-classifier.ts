@@ -15,6 +15,7 @@
 
 import { createHash } from "crypto";
 import type { PIIType } from "./pii-types";
+import { isTokenString } from "./pii-tokenizer";
 
 export interface ClassificationResult {
   value: string;
@@ -41,19 +42,40 @@ const LABEL_TO_PII_TYPE: Record<string, PIIType> = {
 const CONFIDENCE_THRESHOLD = 0.80;
 const MIN_TEXT_LENGTH = 10;
 
+// Circuit breaker: after MAX_CONSECUTIVE_FAILURES, skip for RETRY_COOLDOWN_MS
+const MAX_CONSECUTIVE_FAILURES = 3;
+const RETRY_COOLDOWN_MS = 120_000;
+
 let classifierInstance: any = null;
-let loadAttempted = false;
-let loadFailed = false;
+let consecutiveFailures = 0;
+let lastFailureTime = 0;
+let circuitLogged = false;
 
 /**
  * Lazy-load the DeBERTa model. Caches the instance after first load.
- * Falls back gracefully if model download fails.
+ * If the model fails to load, retries on the next request (up to
+ * MAX_CONSECUTIVE_FAILURES before entering cooldown).
  */
 async function getClassifier(): Promise<any | null> {
   if (classifierInstance) return classifierInstance;
-  if (loadFailed) return null;
 
-  loadAttempted = true;
+  // Circuit breaker: after repeated failures, wait for cooldown
+  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    const elapsed = Date.now() - lastFailureTime;
+    if (elapsed < RETRY_COOLDOWN_MS) {
+      if (!circuitLogged) {
+        console.warn(
+          `[DeBERTa] Circuit open (${consecutiveFailures} failures), skipping for ${Math.ceil((RETRY_COOLDOWN_MS - elapsed) / 1000)}s`,
+        );
+        circuitLogged = true;
+      }
+      throw new Error("DeBERTa classifier unavailable (circuit open)");
+    }
+    consecutiveFailures = 0;
+    circuitLogged = false;
+    console.log("[DeBERTa] Circuit closed, retrying model load");
+  }
+
   try {
     const { pipeline, env } = await import("@huggingface/transformers");
 
@@ -67,14 +89,19 @@ async function getClassifier(): Promise<any | null> {
     );
 
     console.log("[DeBERTa] Model loaded successfully");
+    consecutiveFailures = 0;
+    circuitLogged = false;
     return classifierInstance;
   } catch (err) {
+    consecutiveFailures++;
+    lastFailureTime = Date.now();
     console.warn(
-      "[DeBERTa] Failed to load model. Falling back to regex-only PII detection.",
+      `[DeBERTa] Failed to load model (attempt ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}).`,
       err,
     );
-    loadFailed = true;
-    return null;
+    throw new Error(
+      `DeBERTa classifier failed to load after ${consecutiveFailures} attempt(s)`,
+    );
   }
 }
 
@@ -89,50 +116,44 @@ export async function classifyPII(
   if (!text || text.trim().length < MIN_TEXT_LENGTH) return [];
 
   const classifier = await getClassifier();
-  if (!classifier) return [];
 
-  try {
-    const entities = await classifier(text, { aggregation_strategy: "simple" });
+  const entities = await classifier(text, { aggregation_strategy: "simple" });
 
-    if (!entities || !Array.isArray(entities)) return [];
+  if (!entities || !Array.isArray(entities)) return [];
 
-    const results: ClassificationResult[] = [];
+  const results: ClassificationResult[] = [];
 
-    for (const entity of entities) {
-      if (entity.score < CONFIDENCE_THRESHOLD) continue;
+  for (const entity of entities) {
+    if (entity.score < CONFIDENCE_THRESHOLD) continue;
 
-      const rawSpan = text.slice(entity.start, entity.end);
-      // Skip if already tokenized (looks like a PII token)
-      if (rawSpan.startsWith("[CLAW_")) continue;
+    const rawSpan = text.slice(entity.start, entity.end);
+    // Skip if already tokenized (looks like a PII token)
+    if (isTokenString(rawSpan)) continue;
 
-      const label = (
-        entity.entity_group ||
-        entity.entity ||
-        "PII"
-      ).toUpperCase();
-      const piiType = LABEL_TO_PII_TYPE[label] ?? "person_name";
+    const label = (
+      entity.entity_group ||
+      entity.entity ||
+      "PII"
+    ).toUpperCase();
+    const piiType = LABEL_TO_PII_TYPE[label] ?? "person_name";
 
-      results.push({
-        value: rawSpan.trim(),
-        category: piiType,
-        start: entity.start,
-        end: entity.end,
-        score: entity.score,
-      });
-    }
-
-    return results;
-  } catch (err) {
-    console.warn("[DeBERTa] Classification error:", err);
-    return [];
+    results.push({
+      value: rawSpan.trim(),
+      category: piiType,
+      start: entity.start,
+      end: entity.end,
+      score: entity.score,
+    });
   }
+
+  return results;
 }
 
 /**
  * Check if DeBERTa model is available (loaded successfully).
  */
 export function isDeBERTaAvailable(): boolean {
-  return classifierInstance !== null && !loadFailed;
+  return classifierInstance !== null;
 }
 
 /**
@@ -140,7 +161,7 @@ export function isDeBERTaAvailable(): boolean {
  * Non-blocking — fires and forgets.
  */
 export function prewarmDeBERTa(): void {
-  if (!loadAttempted && !loadFailed) {
+  if (!classifierInstance && consecutiveFailures < MAX_CONSECUTIVE_FAILURES) {
     void getClassifier();
   }
 }

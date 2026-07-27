@@ -14,7 +14,7 @@ import { createHash } from "crypto";
 import type { PIIMatch, PIIMapping, PIIType, PIIVaultStats } from "./pii-types";
 import { scanForPII, scanForPIIEnhanced, extractStructuredPII } from "./pii-scanner";
 
-/** Token format: [CLAW_TYPE_HASH] e.g. [CLAW_EMAIL_A1B2], [CLAW_NAME_C3D4] */
+/** Token format: email gets domain format, others get bracket format */
 function makeToken(type: PIIType, index: number): string {
   const label = type.toUpperCase().replace(/_/g, "_");
   const hash = createHash("md5")
@@ -22,7 +22,25 @@ function makeToken(type: PIIType, index: number): string {
     .digest("hex")
     .slice(0, 4)
     .toUpperCase();
+  if (type === "email") {
+    return `CLAW_EMAIL_${hash}@trustclaw.anon`;
+  }
   return `[CLAW_${label}_${hash}]`;
+}
+
+export function isTokenString(s: string): boolean {
+  return s.startsWith("[CLAW_") || s.endsWith("@trustclaw.anon");
+}
+
+/** Canonical form for forwardMap lookups: lowercase, trimmed, collapsed whitespace */
+function canonicalizeForLookup(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** True if text contains a PII token anywhere (not necessarily bounded by word boundaries) */
+const CONTAINS_TOKEN_RE = /(?:\[CLAW_[A-Z_]+_[A-F0-9]{4}\]|CLAW_EMAIL_[A-F0-9]{4}@trustclaw\.anon)/;
+export function containsTokenPattern(text: string): boolean {
+  return CONTAINS_TOKEN_RE.test(text);
 }
 
 export class PIIVault {
@@ -45,21 +63,21 @@ export class PIIVault {
    * @returns The placeholder token.
    */
   registerPII(type: PIIType, value: string): string {
-    // Normalise whitespace for matching
-    const normalised = value.trim();
-    if (!normalised) return value;
+    const canonical = canonicalizeForLookup(value);
+    if (!canonical) return value;
 
-    // Dedup: reuse existing token for the same value
-    const existing = this.forwardMap.get(normalised);
+    // Dedup: reuse existing token for the same canonical value
+    const existing = this.forwardMap.get(canonical);
     if (existing) return existing;
 
     const count = (this.counters.get(type) ?? 0) + 1;
     this.counters.set(type, count);
 
     const token = makeToken(type, count);
-    this.forwardMap.set(normalised, token);
-    this.reverseMap.set(token, normalised);
-    this.mappings.push({ token, original: normalised, type });
+    const trimmed = value.trim();
+    this.forwardMap.set(canonical, token);
+    this.reverseMap.set(token, trimmed);
+    this.mappings.push({ token, original: trimmed, type });
 
     return token;
   }
@@ -93,7 +111,7 @@ export class PIIVault {
     for (let i = matches.length - 1; i >= 0; i--) {
       const match = matches[i]!;
       // Skip if already tokenized
-      if (match.value.startsWith("[CLAW_")) continue;
+      if (isTokenString(match.value)) continue;
       const token = this.registerPII(match.type, match.value);
       result = result.slice(0, match.start) + token + result.slice(match.end);
     }
@@ -175,8 +193,8 @@ export class PIIVault {
   // ─── Private ───────────────────────────────────────────────────
 
   private async deepRedact(value: unknown, depth = 0): Promise<unknown> {
-    // Safety: don't recurse infinitely
-    if (depth > 10) return value;
+    // Safety: don't recurse infinitely (meta-tool results are deeply nested)
+    if (depth > 25) return value;
 
     if (typeof value === "string") {
       return this.redactString(value);
@@ -199,7 +217,7 @@ export class PIIVault {
   }
 
   private deepRestore(value: unknown, depth = 0): unknown {
-    if (depth > 10) return value;
+    if (depth > 25) return value;
 
     if (typeof value === "string") {
       return this.restore(value);
@@ -252,7 +270,7 @@ export class PIIVault {
     for (let i = newMatches.length - 1; i >= 0; i--) {
       const match = newMatches[i]!;
       // Skip if this span was already replaced by a token
-      if (match.value.startsWith("[CLAW_")) continue;
+      if (isTokenString(match.value)) continue;
 
       const token = this.registerPII(match.type, match.value);
       result =

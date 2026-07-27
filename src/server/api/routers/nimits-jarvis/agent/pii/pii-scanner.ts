@@ -35,7 +35,7 @@ const EMAIL_RE =
  * - 2345678901 (10+ digits)
  */
 const PHONE_RE =
-  /(?:\+\d{1,3}[\s\-.]?)?\(?\d{2,4}\)?[\s\-.]?\d{3,4}[\s\-.]?\d{3,4}(?:\s*(?:ext|x)\s*\d{1,5})?/g;
+  /\b(?:\+\d{1,3}[\s\-.]?)?\(?\d{2,4}\)?[\s\-.]?\d{3,4}[\s\-.]?\d{3,4}(?:\s*(?:ext|x)\s*\d{1,5})?/g;
 
 /**
  * Credit card numbers: 13-19 digits, optionally separated by spaces or dashes.
@@ -101,7 +101,7 @@ function passesLuhn(numStr: string): boolean {
 interface PatternEntry {
   type: PIIType;
   regex: RegExp;
-  validate?: (match: string) => boolean;
+  validate?: (match: string, fullText?: string, matchIndex?: number) => boolean;
 }
 
 const PATTERNS: PatternEntry[] = [
@@ -117,10 +117,16 @@ const PATTERNS: PatternEntry[] = [
     validate: passesLuhn,
   },
   { type: "ip_address", regex: IPV4_RE },
-  { type: "phone", regex: PHONE_RE, validate: (m) => {
+  { type: "phone", regex: PHONE_RE, validate: (m, text, idx) => {
     // Must have at least 10 digits to be a real phone number
     const digits = m.replace(/\D/g, "");
-    return digits.length >= 10;
+    if (digits.length < 10) return false;
+    // Reject if preceded by alphanumeric (resource ID like "c123456789036")
+    if (idx !== undefined && text && idx > 0) {
+      const prev = text.charAt(idx - 1);
+      if (/[a-zA-Z0-9]/.test(prev)) return false;
+    }
+    return true;
   }},
   { type: "address", regex: ADDRESS_RE },
 ];
@@ -144,8 +150,8 @@ export function scanForPII(text: string): PIIMatch[] {
       const value = match[0].trim();
       if (!value) continue;
 
-      // Run optional validator (e.g. Luhn for credit cards)
-      if (pattern.validate && !pattern.validate(value)) {
+      // Run optional validator (e.g. Luhn for credit cards, phone context check)
+      if (pattern.validate && !pattern.validate(value, text, match.index)) {
         continue;
       }
 
@@ -225,6 +231,12 @@ const PII_FIELD_PATHS: Array<{
   { path: ["homePhones", "*"], type: "phone" },
   { path: ["mobilePhone"], type: "phone" },
   { path: ["businessPhones", "*"], type: "phone" },
+
+  // Gmail People API (people.get / people.searchDirectoryPeople)
+  { path: ["names", "*", "displayName"], type: "person_name" },
+  { path: ["names", "*", "givenName"], type: "person_name" },
+  { path: ["names", "*", "familyName"], type: "person_name" },
+  { path: ["emailAddresses", "*", "value"], type: "email" },
 
   // Slack / Discord
   { path: ["author", "name"], type: "person_name" },
@@ -341,7 +353,7 @@ function deepWalkPIIByKeyName(
   obj: unknown,
   depth = 0,
 ): PIIMatch[] {
-  if (depth > 10) return []; // Safety: prevent infinite recursion
+  if (depth > 25) return []; // Safety: prevent infinite recursion
   if (!obj || typeof obj !== "object") return [];
 
   const matches: PIIMatch[] = [];
@@ -466,8 +478,8 @@ export async function scanForPIIEnhanced(text: string): Promise<PIIMatch[]> {
         end: match.end,
       });
     }
-  } catch {
-    // DeBERTa unavailable — continue with regex+identity
+  } catch (error) {
+    console.warn("[PII Scanner] DeBERTa classification failed, continuing with regex+identity:", error);
   }
 
   // Deduplicate overlaps
@@ -490,11 +502,9 @@ function scanIdentityRegistry(text: string): PIIMatch[] {
     const piiType = categoryToPIIType(category);
     const escaped = literal.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
 
-    // Use word boundary for short strings, plain includes for longer ones
-    const regex =
-      literal.length <= 3
-        ? new RegExp(`\\b${escaped}\\b`, "gi")
-        : new RegExp(escaped, "gi");
+    // Always use word boundaries to prevent partial matches
+    // (e.g. "Nimit" should not match within "Nimits")
+    const regex = new RegExp(`\\b${escaped}\\b`, "gi");
 
     let match: RegExpExecArray | null;
     while ((match = regex.exec(text)) !== null) {

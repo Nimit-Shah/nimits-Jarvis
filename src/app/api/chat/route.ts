@@ -53,21 +53,28 @@ async function resolveChatId(instanceId: string, chatId?: string): Promise<strin
 
 /**
  * PII token pattern for detecting partial tokens at chunk boundaries.
- * Matches tokens like [CLAW_EMAIL_A1B2], [CLAW_PHONE_C3D4], [CLAW_NAME_E5F6].
+ * Matches both bracket tokens [CLAW_TYPE_HASH] and email tokens CLAW_EMAIL_hash@trustclaw.anon.
+ * Note: [A-Z_]+ matches multi-word types (PERSON_NAME, CREDIT_CARD, etc.).
  */
-const PII_TOKEN_RE = /\[CLAW_[A-Z]+_[A-F0-9]{4}\]/g;
+const PII_TOKEN_RE = /(?:\[CLAW_[A-Z_]+_[A-F0-9]{4}\]|CLAW_EMAIL_[A-F0-9]{4}@trustclaw\.anon)/g;
 
 /**
  * Checks if the tail of a string starts what looks like a partial PII token.
- * e.g. "text [CLAW_EMA" or "text [CLAW_EMAIL_" — these could be the start of "[CLAW_EMAIL_A1B2]"
- * that got split by an SSE chunk boundary.
+ * Buffers any incomplete bracket or email token across SSE chunk boundaries.
  */
 function partialTokenAtEnd(str: string): string {
+  // Check for incomplete bracket token: [... without ]
   const lastBracket = str.lastIndexOf("[");
-  if (lastBracket === -1) return "";
-  const tail = str.slice(lastBracket);
-  // Only buffer if tail looks like the start of a CLAW PII token pattern
-  if (/^\[CLAW_[A-Z]+(?:_[A-F0-9]{0,3})?$/.test(tail)) return tail;
+  if (lastBracket !== -1) {
+    const tail = str.slice(lastBracket);
+    if (tail.startsWith("[CLAW_") && !tail.includes("]")) return tail;
+  }
+  // Check for incomplete email token: CLAW_EMAIL_... without @trustclaw.anon
+  const emailIdx = str.lastIndexOf("CLAW_EMAIL_");
+  if (emailIdx !== -1) {
+    const tail = str.slice(emailIdx);
+    if (!tail.includes("@trustclaw.anon")) return tail;
+  }
   return "";
 }
 

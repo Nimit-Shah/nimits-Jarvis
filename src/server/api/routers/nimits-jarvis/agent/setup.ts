@@ -48,13 +48,37 @@ type MessageSource = "web" | "telegram" | "cron";
 function wrapToolExecutors(tools: ToolSet, vault: PIIVault | null): ToolSet {
   const wrapped: ToolSet = {};
   for (const [name, tool] of Object.entries(tools)) {
-    if (tool.execute) {
-      const originalExecute = tool.execute;
-      wrapped[name] = {
-        ...tool,
-        execute: async (...args: Parameters<typeof originalExecute>) => {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-          const result = await originalExecute(...args);
+    if (!tool.execute) {
+      wrapped[name] = tool;
+      continue;
+    }
+    const originalExecute = tool.execute;
+    wrapped[name] = {
+      ...tool,
+      execute: async (...args: Parameters<typeof originalExecute>) => {
+          // Step 1: Restore PII tokens in tool inputs before sending
+          // to Composio. The LLM generated tool args may contain PII tokens
+          // like [CLAW_EMAIL_A1B2] that need to be restored to real values.
+          const [input] = args;
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+          const restoredInput = vault ? vault.restoreDeep(input) : input;
+
+          // Step 2: Call the actual tool with restored (real) values
+          let result;
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+            result = await originalExecute(restoredInput, ...(args.slice(1) as [any]));
+          } catch (error) {
+            // Step 3: Sanitize error messages — any PII that leaked into
+            // the error message (e.g. "Failed to send to john@example.com")
+            // must be re-redacted before it reaches the LLM context.
+            if (vault && error instanceof Error) {
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+              error.message = await vault.redact(error.message);
+            }
+            throw error;
+          }
+
           // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
           const sanitized = deepSanitize(result);
 
@@ -70,9 +94,6 @@ function wrapToolExecutors(tools: ToolSet, vault: PIIVault | null): ToolSet {
           return sanitized;
         },
       };
-    } else {
-      wrapped[name] = tool;
-    }
   }
   return wrapped;
 }

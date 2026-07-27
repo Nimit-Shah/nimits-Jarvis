@@ -14,7 +14,7 @@
  *   // restored === "john@example.com is your contact"
  */
 
-export { PIIVault } from "./pii-tokenizer";
+export { PIIVault, containsTokenPattern, isTokenString } from "./pii-tokenizer";
 export { PIITransportShield } from "./pii-transport-shield";
 export { scanForPII, extractStructuredPII } from "./pii-scanner";
 export type {
