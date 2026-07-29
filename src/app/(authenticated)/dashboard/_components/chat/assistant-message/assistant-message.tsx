@@ -6,15 +6,49 @@ import remarkGfm from "remark-gfm";
 import { Copy, Check } from "lucide-react";
 import type { UIMessage } from "@ai-sdk/react";
 import type { ChatStatus, DynamicToolUIPart, ToolUIPart, ReasoningUIPart } from "ai";
-import { isToolUIPart, isReasoningUIPart } from "ai";
+import { isToolUIPart, isReasoningUIPart, getToolName } from "ai";
 import { ThinkingIndicator } from "./thinking-indicator";
-import { CollapsibleToolSection } from "./collapsible-tool-section";
+import { ToolCallsSection } from "~/components/ui/tool-calls-section";
+import type { ToolCallEntry } from "~/components/ui/tool-calls-section";
 import { CodeBlock } from "./code-block";
 import { TableBlock } from "./table-block";
 import { stripToolResultEchoes } from "~/server/api/routers/nimits-jarvis/agent/strip-tool-echoes";
 import { PROSE_CLASSES } from "./prose-classes";
 
 type TextUIPart = { type: "text"; text: string };
+
+function mapToToolCallEntry(part: DynamicToolUIPart | ToolUIPart): ToolCallEntry {
+  const rawName = getToolName(part);
+  const displayName = rawName.replace(/^(COMPOSIO_|RUBE_)/, "");
+  const category = displayName.split("_")[0]?.toLowerCase() ?? "general";
+
+  let state: ToolCallEntry["state"];
+  if (part.state === "input-streaming" || part.state === "input-available") {
+    state = part.state;
+  } else if (part.state === "output-available") {
+    state = "output-available";
+  } else if (part.state === "output-error") {
+    state = "output-error";
+  }
+
+  return {
+    tool_name: rawName,
+    tool_category: category,
+    message:
+      state === "input-streaming" || state === "input-available"
+        ? `Using ${displayName}...`
+        : `Used ${displayName}`,
+    inputs: part.input as Record<string, unknown>,
+    output:
+      part.state === "output-available"
+        ? typeof part.output === "string"
+          ? part.output
+          : JSON.stringify(part.output, null, 2)
+        : undefined,
+    integration_name: displayName.replace(/_/g, " "),
+    state,
+  };
+}
 
 type MessageSegment =
   | { kind: "text"; parts: TextUIPart[] }
@@ -119,10 +153,9 @@ export function AssistantMessage({
     <div className="space-y-4">
       {/* Chain of thought: reasoning + tool calls — above text */}
       {(reasoningTexts.length > 0 || toolCalls.length > 0) && (
-        <CollapsibleToolSection
-          toolCalls={toolCalls}
+        <ToolCallsSection
+          toolCalls={toolCalls.map(mapToToolCallEntry)}
           reasoningTexts={reasoningTexts}
-          isRunning={isRunning}
         />
       )}
 
