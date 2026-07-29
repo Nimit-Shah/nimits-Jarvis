@@ -30,11 +30,15 @@ export function UserMessage({ message }: UserMessageProps) {
     copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
   };
 
+  const paragraphs = textContent.split(/\n\n+/).filter(Boolean);
+
   return (
     <div className="flex flex-col items-end">
       <div className="relative max-w-[80%]">
-        <div className="rounded-2xl bg-muted px-3 py-2 text-[12px] text-foreground">
-          <p className="whitespace-pre-wrap leading-relaxed">{textContent}</p>
+        <div className="rounded-2xl bg-muted px-3 py-2 text-[12px] text-foreground space-y-1">
+          {paragraphs.map((p, i) => (
+            <p key={i} className="whitespace-pre-wrap leading-relaxed">{p}</p>
+          ))}
         </div>
       </div>
 

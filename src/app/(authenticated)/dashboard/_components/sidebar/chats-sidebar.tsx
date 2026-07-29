@@ -62,9 +62,8 @@ export function ChatsSidebar() {
     onSuccess: () => {
       void utils.chats.list.invalidate();
       setDeleteTarget(null);
-      if (chats && chats.length > 1) {
-        const remaining = chats.filter((c) => c.id !== deleteTarget);
-        if (remaining[0]) setChatId(remaining[0].id);
+      if (deleteTarget === chatId) {
+        void createChat.mutateAsync({ instanceId });
       }
     },
   });

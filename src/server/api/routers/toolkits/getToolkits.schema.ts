@@ -5,7 +5,7 @@ export const getToolkitsInput = z.object({
   search: z.string().optional(),
   isConnected: z.boolean().optional(),
   cursor: z.string().optional(),
-  limit: z.number().min(1).max(50).default(20),
+  limit: z.number().min(1).max(50).default(50),
 });
 
 export type GetToolkitsInput = z.infer<typeof getToolkitsInput>;

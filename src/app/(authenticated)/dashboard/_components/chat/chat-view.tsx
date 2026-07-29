@@ -238,6 +238,7 @@ export function ChatView() {
                 initialTopMostItemIndex={{ index: "LAST", align: "end" }}
                 startReached={handleStartReached}
                 atBottomThreshold={50}
+                followOutput="smooth"
                 increaseViewportBy={{ top: 200, bottom: 0 }}
                 components={{
                   Header: () =>

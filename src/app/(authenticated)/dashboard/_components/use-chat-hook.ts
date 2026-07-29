@@ -34,7 +34,7 @@ export function useChatHook({ initialMessages, streamId, chatId }: {
               parts: textParts.map((p) => ({
                 ...p,
                 text: p.text.replace(
-                  /(?:^|\s)[\w-]+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|tiff)(?:\s|$)/gi,
+                  /(?:^|\s)\/?[^\s]*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|tiff)(?:\s|$)/gi,
                   " ",
                 ),
               })),
@@ -61,8 +61,8 @@ export function useChatHook({ initialMessages, streamId, chatId }: {
     onError: (error) => {
       void utils.nimitsJarvis.getHistory.invalidate();
       const msg = error.message || "An error occurred";
-      if (msg.includes("image")) {
-        showErrorToast("This model does not support image input. Please use text only.");
+      if (msg.includes("image") || msg.includes("Cannot read")) {
+        showErrorToast("Image input is not supported. Please remove any attached images and try again.");
       } else {
         showErrorToast(msg);
       }

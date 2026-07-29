@@ -11,7 +11,7 @@ export default async function Page({
   if (instance) {
     void trpcServer.api.toolkits.getToolkits.prefetchInfinite({
       instanceId: instance,
-      limit: 20,
+      limit: 50,
     });
   }
 

@@ -23,17 +23,6 @@ export const deleteChat = protectedProcedure
       });
     }
 
-    const remainingChats = await db.chat.count({
-      where: { instanceId: chat.instanceId },
-    });
-
-    if (remainingChats <= 1) {
-      throw new TRPCError({
-        code: "PRECONDITION_FAILED",
-        message: "Cannot delete the last chat in a project",
-      });
-    }
-
     await db.$transaction(async (tx) => {
       await tx.message.deleteMany({ where: { chatId: chat.id } });
       await tx.cronJob.deleteMany({ where: { chatId: chat.id } });

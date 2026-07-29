@@ -366,6 +366,12 @@ export async function prepareAgentRun(
       maxTokens: 512,
     }),
     onFinish: async (result) => {
+      await clearStreamingMessage(chatId).catch((error) =>
+        console.error(
+          "[agent/onFinish] clearStreamingMessage failed:",
+          error,
+        ),
+      );
       try {
         const { totalUsage, steps, finishReason } = result;
         const inputTokens = totalUsage.inputTokens ?? 0;
@@ -412,6 +418,22 @@ export async function prepareAgentRun(
               ? piiVault.restore(stepText)
               : stepText;
             assistantParts.push({ type: "text" as const, text: restoredText });
+          }
+
+          // Persist reasoning/thinking for replay in the chain-of-thought UI.
+          // Uses the reasoning text as-is (it references the PII-tokenized input
+          // the model saw, not the real values).
+          const stepReasoning =
+            step.reasoningText ??
+            (step.reasoning?.length
+              ? step.reasoning.map((r) => (r as { text?: string }).text ?? "").filter(Boolean).join("\n")
+              : "");
+          if (stepReasoning) {
+            assistantParts.push({
+              type: "reasoning" as const,
+              text: stepReasoning,
+              state: "done" as const,
+            });
           }
         }
 
@@ -471,13 +493,6 @@ export async function prepareAgentRun(
         );
       } catch (error) {
         console.error("[agent/onFinish] post-stream processing failed:", error);
-      } finally {
-        await clearStreamingMessage(chatId).catch((error) =>
-          console.error(
-            "[agent/onFinish] clearStreamingMessage failed:",
-            error,
-          ),
-        );
       }
     },
   });

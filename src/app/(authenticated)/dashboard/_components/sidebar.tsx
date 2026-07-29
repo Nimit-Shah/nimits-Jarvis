@@ -372,6 +372,7 @@ export function Sidebar() {
                   {activeInstanceName}
                 </p>
               </div>
+              <ChevronDown className={`size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${profileOpen ? "rotate-180" : ""}`} />
             </button>
           </PopoverTrigger>
           <PopoverContent className="w-48 p-1" align="start" side="top">

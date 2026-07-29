@@ -35,11 +35,13 @@ function getDisplayName(name: string): string {
 
 interface CollapsibleToolSectionProps {
   toolCalls: AnyToolUIPart[];
+  reasoningTexts: string[];
   isRunning: boolean;
 }
 
 export function CollapsibleToolSection({
   toolCalls,
+  reasoningTexts,
   isRunning,
 }: CollapsibleToolSectionProps) {
   const [open, setOpen] = useState(isRunning);
@@ -50,20 +52,33 @@ export function CollapsibleToolSection({
 
   const completedCount = toolCalls.length - runningCount;
   const hasErrors = toolCalls.some(isErrorTool);
+  const hasReasoning = reasoningTexts.length > 0;
+  const allReasoning = reasoningTexts.filter(Boolean).join("\n");
 
-  // Auto-expand when new tool calls arrive
+  // Auto-expand when streaming
   useEffect(() => {
     if (isRunning) setOpen(true);
   }, [isRunning]);
 
   const totalElapsed = useMemo(() => {
-    // Not tracked per-section; just show per-tool elapsed
     return null;
   }, []);
 
+  const label = isRunning
+    ? hasReasoning
+      ? "Thinking..."
+      : runningCount === 1
+        ? "Using a tool..."
+        : `Using ${runningCount} tools...`
+    : hasReasoning && toolCalls.length === 0
+      ? "Thought"
+      : toolCalls.length === 1
+        ? "Used 1 tool"
+        : `Used ${toolCalls.length} tools`;
+
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted/50 group">
+      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2 text-left transition-colors hover:bg-muted/40 group">
         <ChevronRight
           className={cn(
             "size-3 shrink-0 text-muted-foreground transition-transform duration-200",
@@ -77,27 +92,33 @@ export function CollapsibleToolSection({
         ) : (
           <CheckCircle2 className="size-3 text-chart-2" />
         )}
-        <span className="text-[12px] text-muted-foreground">
-          {isRunning
-            ? runningCount === 1
-              ? "Using a tool..."
-              : `Using ${runningCount} tools...`
-            : completedCount === 1
-              ? "Used 1 tool"
-              : `Used ${completedCount} tools`}
-        </span>
+        <span className="text-[12px] text-muted-foreground">{label}</span>
         {hasErrors && !isRunning && (
           <span className="text-[10px] text-destructive ml-1">(with errors)</span>
         )}
       </CollapsibleTrigger>
-      <CollapsibleContent className="pl-5 pr-1 pb-2">
-        <div className="space-y-1">
-          {toolCalls.map((tc) => (
-            <ToolCallCard
-              key={tc.toolCallId}
-              toolCall={tc}
-            />
-          ))}
+      <CollapsibleContent className="pt-1">
+        <div className="space-y-2">
+          {/* Reasoning text */}
+          {allReasoning && (
+            <div className="rounded-lg border border-border/30 bg-muted/10 px-3 py-2">
+              <pre className="whitespace-pre-wrap text-[11px] text-muted-foreground/60 leading-relaxed font-sans">
+                {allReasoning}
+              </pre>
+            </div>
+          )}
+
+          {/* Tool call cards */}
+          {toolCalls.length > 0 && (
+            <div className="space-y-1 pl-4 pr-1 pb-2">
+              {toolCalls.map((tc) => (
+                <ToolCallCard
+                  key={tc.toolCallId}
+                  toolCall={tc}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </CollapsibleContent>
     </Collapsible>

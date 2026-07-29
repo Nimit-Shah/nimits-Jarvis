@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Search, Loader2 } from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import { Input } from "~/components/ui/input";
@@ -38,13 +38,14 @@ export function ToolkitsClient() {
   } = trpc.toolkits.getToolkits.useInfiniteQuery(
     {
       instanceId,
-      search: search.length >= 3 ? search : undefined,
       isConnected: isConnectedFilter,
-      limit: 20,
+      limit: 50,
     },
     {
       getNextPageParam: (lastPage) => lastPage.nextCursor,
       staleTime: 30_000,
+      refetchOnWindowFocus: true,
+      refetchInterval: 60_000,
     },
   );
 
@@ -78,7 +79,35 @@ export function ToolkitsClient() {
   };
 
   const allItems = data?.pages.flatMap((page) => page.items) ?? [];
-  const connectedCount = data?.pages[0]?.connectedCount ?? 0;
+  const connectedCount = allItems.filter((t) => t.connected).length;
+
+  // Client-side search filter
+  const filteredItems = allItems.filter((item) =>
+    search.length === 0
+      ? true
+      : item.name.toLowerCase().includes(search.toLowerCase()) ||
+        item.slug.toLowerCase().includes(search.toLowerCase()),
+  );
+
+  // Infinite scroll sentinel
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = loadMoreRef.current;
+    if (!el) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          void fetchNextPage();
+        }
+      },
+      { threshold: 0.1 },
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   if (isLoading) {
     return (
@@ -150,7 +179,7 @@ export function ToolkitsClient() {
       {/* Grid */}
       <div className="flex-1 min-h-0 overflow-y-auto p-6">
         <ErrorBoundary>
-          {allItems.length === 0 && !isFetching ? (
+          {filteredItems.length === 0 && !isFetching ? (
             <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
               <p className="text-[13px] text-muted-foreground">
                 {search
@@ -162,7 +191,7 @@ export function ToolkitsClient() {
             </div>
           ) : (
             <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
-              {allItems.map((toolkit) => (
+              {filteredItems.map((toolkit) => (
                 <ToolkitTile
                   key={toolkit.slug}
                   toolkit={toolkit}
@@ -176,20 +205,13 @@ export function ToolkitsClient() {
           )}
         </ErrorBoundary>
 
-        {hasNextPage && (
-          <div className="flex justify-center pt-4">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void fetchNextPage()}
-              disabled={isFetchingNextPage}
-              className="text-[11px]"
-            >
-              {isFetchingNextPage ? (
-                <Loader2 className="size-3 animate-spin mr-1.5" />
-              ) : null}
-              Load more
-            </Button>
+        {/* Infinite scroll sentinel */}
+        <div ref={loadMoreRef} className="h-1" />
+
+        {/* Loading indicator during fetch */}
+        {isFetchingNextPage && (
+          <div className="flex justify-center py-4">
+            <Loader2 className="size-4 animate-spin text-muted-foreground" />
           </div>
         )}
       </div>

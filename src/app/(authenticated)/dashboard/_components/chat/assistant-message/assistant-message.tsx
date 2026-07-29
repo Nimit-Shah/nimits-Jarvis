@@ -5,8 +5,8 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Copy, Check } from "lucide-react";
 import type { UIMessage } from "@ai-sdk/react";
-import type { ChatStatus, DynamicToolUIPart, ToolUIPart } from "ai";
-import { isToolUIPart } from "ai";
+import type { ChatStatus, DynamicToolUIPart, ToolUIPart, ReasoningUIPart } from "ai";
+import { isToolUIPart, isReasoningUIPart } from "ai";
 import { ThinkingIndicator } from "./thinking-indicator";
 import { CollapsibleToolSection } from "./collapsible-tool-section";
 import { CodeBlock } from "./code-block";
@@ -18,7 +18,8 @@ type TextUIPart = { type: "text"; text: string };
 
 type MessageSegment =
   | { kind: "text"; parts: TextUIPart[] }
-  | { kind: "tool-call"; part: DynamicToolUIPart | ToolUIPart };
+  | { kind: "tool-call"; part: DynamicToolUIPart | ToolUIPart }
+  | { kind: "reasoning"; part: ReasoningUIPart };
 
 function segmentParts(parts: UIMessage["parts"]): MessageSegment[] {
   const segments: MessageSegment[] = [];
@@ -33,6 +34,12 @@ function segmentParts(parts: UIMessage["parts"]): MessageSegment[] {
         textAccum = [];
       }
       segments.push({ kind: "tool-call", part });
+    } else if (isReasoningUIPart(part)) {
+      if (textAccum.length > 0) {
+        segments.push({ kind: "text", parts: textAccum });
+        textAccum = [];
+      }
+      segments.push({ kind: "reasoning", part });
     }
   }
   if (textAccum.length > 0) {
@@ -65,11 +72,17 @@ export function AssistantMessage({
     .filter((s): s is Extract<MessageSegment, { kind: "tool-call" }> => s.kind === "tool-call")
     .map((s) => s.part);
 
+  const reasoningSegments = segments.filter(
+    (s): s is Extract<MessageSegment, { kind: "reasoning" }> => s.kind === "reasoning",
+  );
+
   const textSegments = segments.filter(
     (s): s is Extract<MessageSegment, { kind: "text" }> => s.kind === "text",
   );
 
   const isRunning = status === "streaming" || status === "submitted";
+
+  const reasoningTexts = reasoningSegments.map((s) => s.part.text);
 
   const getFullTextContent = () =>
     textSegments
@@ -104,15 +117,16 @@ export function AssistantMessage({
 
   return (
     <div className="space-y-4">
-      {/* Collapsible tool section — Claude-style */}
-      {toolCalls.length > 0 && (
+      {/* Chain of thought: reasoning + tool calls — above text */}
+      {(reasoningTexts.length > 0 || toolCalls.length > 0) && (
         <CollapsibleToolSection
           toolCalls={toolCalls}
+          reasoningTexts={reasoningTexts}
           isRunning={isRunning}
         />
       )}
 
-      {/* Text content */}
+      {/* Text content — always visible */}
       {textSegments.map((segment, idx) => {
         const textContent = stripToolResultEchoes(
           segment.parts.map((p) => p.text).join(""),
