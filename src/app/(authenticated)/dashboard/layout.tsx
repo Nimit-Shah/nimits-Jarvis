@@ -15,8 +15,8 @@ export default function DashboardLayout({
 
         {/* Desktop: fixed sidebar + flex content */}
         <div className="hidden md:flex flex-1 min-h-0">
-          {/* Left sidebar — fixed 280px */}
-          <aside className="w-[280px] shrink-0 border-r border-border overflow-hidden">
+          {/* Left sidebar — width controlled by Sidebar component */}
+          <aside className="shrink-0 overflow-hidden">
             <Sidebar />
           </aside>
 

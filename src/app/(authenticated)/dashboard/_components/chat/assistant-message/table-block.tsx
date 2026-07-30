@@ -63,7 +63,7 @@ export function TableBlock({ children, ...props }: TableBlockProps) {
       <div className="overflow-x-auto">
         <table
           ref={tableRef}
-          className="w-full text-[12px] [&_th]:border-b [&_th]:border-border/60 [&_th]:bg-muted/20 [&_th]:px-3 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-medium [&_th]:text-muted-foreground [&_td]:border-b [&_td]:border-border/40 [&_td]:px-3 [&_td]:py-1.5 [&_td]:text-foreground/80 [&_tr:last-child_td]:border-0"
+          className="w-full text-[12px]"
           {...props}
         >
           {children}

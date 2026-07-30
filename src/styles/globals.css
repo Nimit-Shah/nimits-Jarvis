@@ -2,6 +2,8 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+@plugin "@tailwindcss/typography";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme {
@@ -48,6 +50,138 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Prose / Typography customization */
+  --prose-body: var(--foreground);
+  --prose-headings: var(--foreground);
+  --prose-links: var(--prose-link);
+  --prose-bold: var(--foreground);
+  --prose-quotes: var(--muted-foreground);
+  --prose-quote-borders: var(--prose-quote-border);
+  --prose-code: var(--prose-code-foreground);
+  --prose-th-borders: var(--border);
+  --prose-td-borders: var(--border);
+}
+
+/* ═══════════════════════════════════════════════════
+   Prose / Typography — semantic tokens
+   ═══════════════════════════════════════════════════ */
+:root {
+  --prose-link: oklch(0.55 0.18 250);
+  --prose-code-foreground: oklch(0.45 0.15 25);
+  --prose-code-bg: oklch(0.97 0.005 250);
+  --prose-quote-border: oklch(0.85 0 0);
+}
+
+.dark {
+  --prose-link: oklch(0.75 0.15 250);
+  --prose-code-foreground: oklch(0.8 0.12 25);
+  --prose-code-bg: oklch(0.22 0.01 250);
+  --prose-quote-border: oklch(0.35 0 0);
+}
+
+/* ═══════════════════════════════════════════════════
+   Prose Typography — overrides for better hierarchy
+   ═══════════════════════════════════════════════════ */
+@layer base {
+  .prose {
+    max-width: none;
+    line-height: 1.65;
+  }
+
+  .prose p {
+    margin-top: 0.9em;
+    margin-bottom: 0.9em;
+  }
+
+  .prose h1, .prose h2, .prose h3, .prose h4 {
+    font-weight: 600;
+  }
+
+  .prose h1 {
+    margin-top: 2em;
+    margin-bottom: 0.6em;
+    font-size: 1.4em;
+  }
+
+  .prose h2 {
+    margin-top: 1.75em;
+    margin-bottom: 0.5em;
+    font-size: 1.25em;
+  }
+
+  .prose h3 {
+    margin-top: 1.5em;
+    margin-bottom: 0.4em;
+    font-size: 1.1em;
+  }
+
+  .prose ul, .prose ol {
+    margin-top: 0.75em;
+    margin-bottom: 0.75em;
+  }
+
+  .prose li {
+    margin-top: 0.25em;
+    margin-bottom: 0.25em;
+  }
+
+  .prose blockquote {
+    font-style: italic;
+    font-weight: 400;
+    border-left-width: 2px;
+    quotes: none;
+    padding-left: 1em;
+  }
+
+  .prose code {
+    background-color: var(--prose-code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 0.3em;
+    font-weight: 450;
+  }
+
+  .prose code::before,
+  .prose code::after {
+    content: none;
+  }
+
+  .prose pre code {
+    background-color: transparent;
+    padding: 0;
+  }
+
+  .prose pre {
+    background-color: var(--prose-code-bg);
+    border-radius: 0.5em;
+  }
+
+  .prose table {
+    font-size: 0.9em;
+  }
+
+  .prose thead {
+    border-bottom-width: 1px;
+  }
+
+  .prose thead th {
+    font-weight: 600;
+    padding-bottom: 0.5em;
+  }
+
+  .prose tbody tr {
+    border-bottom-width: 1px;
+  }
+
+  .prose tbody td,
+  .prose tbody th {
+    padding: 0.5em 0.75em;
+  }
+
+  .prose hr {
+    border-color: var(--border);
+    opacity: 0.6;
+  }
 }
 
 :root {

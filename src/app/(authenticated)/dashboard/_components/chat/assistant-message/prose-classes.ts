@@ -1,2 +1,2 @@
 export const PROSE_CLASSES =
-  "prose prose-[12px] prose-invert max-w-none break-words text-foreground/85 prose-headings:text-foreground prose-headings:font-medium prose-headings:text-[13px] prose-strong:font-medium prose-p:my-2.5 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:my-0 prose-code:text-foreground/70 prose-code:text-[11px] prose-a:text-primary prose-blockquote:border-l-border prose-blockquote:text-muted-foreground prose-table:my-0 prose-th:text-[11px] prose-td:text-[11px]";
+  "prose prose-neutral dark:prose-invert size-full max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0";

@@ -56,15 +56,15 @@ export function CodeBlock({ children, className, ...props }: CodeBlockProps) {
   }, [code]);
 
   return (
-    <div className="group/code relative my-3 overflow-hidden rounded-lg border border-border/50 bg-[#0d1117]">
+    <div className="group/code relative my-3 overflow-hidden rounded-lg border border-border/50 bg-[var(--prose-code-bg)]">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-white/5 px-3 py-1.5">
-        <span className="text-[10px] font-medium text-white/40">
+      <div className="flex items-center justify-between border-b border-border/30 px-3 py-1.5">
+        <span className="text-[10px] font-medium text-muted-foreground/60">
           {language || "code"}
         </span>
         <button
           onClick={handleCopy}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-white/30 transition-colors hover:bg-white/5 hover:text-white/60"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/40 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
         >
           {copied ? (
             <>
@@ -82,7 +82,7 @@ export function CodeBlock({ children, className, ...props }: CodeBlockProps) {
       {/* Body */}
       <div className="overflow-x-auto p-3">
         <pre
-          className="text-[12px] leading-relaxed text-white/80 whitespace-pre-wrap break-words font-mono"
+          className="text-[12px] leading-relaxed text-foreground/80 whitespace-pre-wrap break-words font-mono"
           {...props}
         >
           {code}
