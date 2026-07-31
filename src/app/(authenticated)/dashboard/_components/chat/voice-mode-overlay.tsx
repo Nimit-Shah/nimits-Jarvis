@@ -108,7 +108,7 @@ function useNeuralCanvas(
 
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(96, 220, 255, 0.85)";
+        ctx.fillStyle = "rgba(249, 115, 22, 0.85)";
         ctx.fill();
       }
 
@@ -124,7 +124,7 @@ function useNeuralCanvas(
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
-            ctx.strokeStyle = `rgba(96, 220, 255, ${alpha})`;
+            ctx.strokeStyle = `rgba(249, 115, 22, ${alpha})`;
             ctx.lineWidth = 0.7;
             ctx.stroke();
           }
@@ -163,7 +163,7 @@ function PermissionScreen({
       >
         <button
           onClick={onClose}
-          className="absolute right-6 top-6 z-10 rounded-full p-2 text-cyan-400/60 transition-colors hover:bg-cyan-950/40 hover:text-cyan-300"
+          className="absolute right-6 top-6 z-10 rounded-full p-2 text-orange-400/60 transition-colors hover:bg-orange-950/40 hover:text-orange-300"
           aria-label="Close voice mode"
         >
           <X className="size-5" />
@@ -174,27 +174,27 @@ function PermissionScreen({
             <ShieldAlert className="size-10 text-red-400" />
           </div>
           <div>
-            <h2 className="font-mono text-lg font-bold tracking-wide text-cyan-200">
+            <h2 className="font-mono text-lg font-bold tracking-wide text-orange-200">
               Microphone Blocked
             </h2>
             <p className="mt-2 max-w-sm font-mono text-xs leading-relaxed text-red-400">
               {errorMessage || "Your browser has blocked microphone access for this site."}
             </p>
           </div>
-          <div className="max-w-sm rounded-lg border border-cyan-900/30 bg-cyan-950/15 p-4 text-left font-mono text-xs text-cyan-400/80">
-            <p className="font-semibold text-cyan-300">Chrome / Edge:</p>
+          <div className="max-w-sm rounded-lg border border-orange-900/30 bg-orange-950/15 p-4 text-left font-mono text-xs text-orange-400/80">
+            <p className="font-semibold text-orange-300">Chrome / Edge:</p>
             <p className="mt-1">Click the 🔒 icon in the address bar → Site settings → Microphone → Allow</p>
-            <p className="mt-3 font-semibold text-cyan-300">Safari:</p>
+            <p className="mt-3 font-semibold text-orange-300">Safari:</p>
             <p className="mt-1">Safari → Settings → Websites → Microphone → Allow for this site</p>
           </div>
           {/* Try again button — works if user just fixed settings without refreshing */}
           <button
             onClick={onRequest}
-            className="rounded-lg border border-cyan-800/40 bg-cyan-950/20 px-5 py-2 font-mono text-xs text-cyan-400 transition-colors hover:border-cyan-600/60 hover:bg-cyan-900/30 hover:text-cyan-300"
+            className="rounded-lg border border-orange-800/40 bg-orange-950/20 px-5 py-2 font-mono text-xs text-orange-400 transition-colors hover:border-orange-600/60 hover:bg-orange-900/30 hover:text-orange-300"
           >
             Try Again
           </button>
-          <p className="font-mono text-[10px] uppercase tracking-widest text-cyan-800/40">
+          <p className="font-mono text-[10px] uppercase tracking-widest text-orange-800/40">
             Or refresh the page after changing settings
           </p>
         </div>
@@ -209,7 +209,7 @@ function PermissionScreen({
     >
       <button
         onClick={onClose}
-        className="absolute right-6 top-6 z-10 rounded-full p-2 text-cyan-400/60 transition-colors hover:bg-cyan-950/40 hover:text-cyan-300"
+        className="absolute right-6 top-6 z-10 rounded-full p-2 text-orange-400/60 transition-colors hover:bg-orange-950/40 hover:text-orange-300"
         aria-label="Close voice mode"
       >
         <X className="size-5" />
@@ -218,21 +218,21 @@ function PermissionScreen({
       <div className="flex flex-col items-center gap-6 px-8 text-center">
         <button
           onClick={onRequest}
-          className="group flex size-24 items-center justify-center rounded-full border border-cyan-500/30 bg-cyan-950/20 transition-all hover:border-cyan-400/50 hover:bg-cyan-900/30 hover:shadow-lg hover:shadow-cyan-500/10"
+          className="group flex size-24 items-center justify-center rounded-full border border-orange-500/30 bg-orange-950/20 transition-all hover:border-orange-400/50 hover:bg-orange-900/30 hover:shadow-lg hover:shadow-orange-500/10"
           aria-label="Allow microphone access"
         >
-          <Mic className="size-10 text-cyan-400 transition-transform group-hover:scale-110" />
+          <Mic className="size-10 text-orange-400 transition-transform group-hover:scale-110" />
         </button>
         <div>
-          <h2 className="font-mono text-lg font-bold tracking-wide text-cyan-200">
+          <h2 className="font-mono text-lg font-bold tracking-wide text-orange-200">
             Allow Microphone
           </h2>
-          <p className="mt-2 max-w-xs font-mono text-xs leading-relaxed text-cyan-500/70">
+          <p className="mt-2 max-w-xs font-mono text-xs leading-relaxed text-orange-500/70">
             Jarvis needs access to your microphone to listen to your voice commands.
             Tap the icon above to allow.
           </p>
         </div>
-        <p className="font-mono text-[10px] uppercase tracking-widest text-cyan-700/40">
+        <p className="font-mono text-[10px] uppercase tracking-widest text-orange-700/40">
           Audio is processed locally — never sent to any cloud
         </p>
       </div>
@@ -309,7 +309,7 @@ export function VoiceModeOverlay({
       {/* Close button */}
       <button
         onClick={onClose}
-        className="absolute right-6 top-6 z-10 rounded-full p-2 text-cyan-400/60 transition-colors hover:bg-cyan-950/40 hover:text-cyan-300"
+        className="absolute right-6 top-6 z-10 rounded-full p-2 text-orange-400/60 transition-colors hover:bg-orange-950/40 hover:text-orange-300"
         aria-label="Close voice mode"
       >
         <X className="size-5" />
@@ -317,10 +317,10 @@ export function VoiceModeOverlay({
 
       {/* Header */}
       <div className="relative z-10 mb-12 text-center">
-        <p className="font-mono text-xs uppercase tracking-[0.35em] text-cyan-500/50">
+        <p className="font-mono text-xs uppercase tracking-[0.35em] text-orange-500/50">
           J.A.R.V.I.S
         </p>
-        <p className="mt-1 font-mono text-[10px] uppercase tracking-widest text-cyan-700/40">
+        <p className="mt-1 font-mono text-[10px] uppercase tracking-widest text-orange-700/40">
           Voice Interface Active
         </p>
       </div>
@@ -331,11 +331,11 @@ export function VoiceModeOverlay({
         {isActive && (
           <>
             <div
-              className="jarvis-ring absolute rounded-full border border-cyan-400/30"
+              className="jarvis-ring absolute rounded-full border border-orange-400/30"
               style={{ width: 220, height: 220 }}
             />
             <div
-              className="jarvis-ring-delay absolute rounded-full border border-cyan-500/20"
+              className="jarvis-ring-delay absolute rounded-full border border-orange-500/20"
               style={{ width: 220, height: 220 }}
             />
           </>
@@ -348,7 +348,7 @@ export function VoiceModeOverlay({
             width: 200,
             height: 200,
             background:
-              "radial-gradient(circle, rgba(0,210,255,0.18) 0%, transparent 70%)",
+              "radial-gradient(circle, rgba(249,115,22,0.18) 0%, transparent 70%)",
             filter: "blur(20px)",
             transform: `scale(${orbScale})`,
             transition: "transform 60ms linear",
@@ -363,30 +363,30 @@ export function VoiceModeOverlay({
             height: 160,
             background:
               isActive
-                ? "radial-gradient(circle at 38% 38%, #00eaff 0%, #005fa3 45%, #001832 100%)"
-                : "radial-gradient(circle at 38% 38%, #00aabb 0%, #003a66 55%, #000d1a 100%)",
+                ? "radial-gradient(circle at 38% 38%, #F97316 0%, #B45309 45%, #78350F 100%)"
+                : "radial-gradient(circle at 38% 38%, #FB923C 0%, #92400E 55%, #451A03 100%)",
             boxShadow: isActive
-              ? "0 0 50px rgba(0,234,255,0.55), 0 0 100px rgba(0,120,200,0.3), inset 0 0 30px rgba(0,200,255,0.25)"
-              : "0 0 30px rgba(0,180,220,0.25), 0 0 60px rgba(0,80,140,0.15), inset 0 0 20px rgba(0,150,200,0.12)",
+              ? "0 0 50px rgba(249,115,22,0.55), 0 0 100px rgba(180,83,9,0.3), inset 0 0 30px rgba(251,146,60,0.25)"
+              : "0 0 30px rgba(217,119,6,0.25), 0 0 60px rgba(146,64,14,0.15), inset 0 0 20px rgba(245,158,11,0.12)",
             transform: `scale(${orbScale})`,
             transition: "transform 60ms linear, box-shadow 300ms ease",
           }}
         >
           {isProcessing ? (
-            <Loader2 className="size-8 animate-spin text-cyan-200/80" />
+            <Loader2 className="size-8 animate-spin text-orange-200/80" />
           ) : isListening ? (
-            <Mic className="size-8 text-cyan-100/90" />
+            <Mic className="size-8 text-orange-100/90" />
           ) : isSpeaking ? (
-            <MicOff className="size-8 text-cyan-100/70" />
+            <MicOff className="size-8 text-orange-100/70" />
           ) : (
-            <Mic className="size-8 text-cyan-300/70" />
+            <Mic className="size-8 text-orange-300/70" />
           )}
         </div>
       </div>
 
       {/* Status label */}
       <div className="relative z-10 mt-10 text-center">
-        <p className="font-mono text-sm tracking-widest text-cyan-400/80">
+        <p className="font-mono text-sm tracking-widest text-orange-400/80">
           {error ? (
             <span className="text-red-400">{error}</span>
           ) : (
@@ -394,7 +394,7 @@ export function VoiceModeOverlay({
           )}
         </p>
         {isListening && (
-          <p className="mt-2 font-mono text-[11px] text-cyan-600/50">
+          <p className="mt-2 font-mono text-[11px] text-orange-600/50">
             Stop speaking to auto-send
           </p>
         )}
@@ -402,15 +402,15 @@ export function VoiceModeOverlay({
 
       {/* Transcription preview */}
       {lastTranscription && (
-        <div className="relative z-10 mx-auto mt-8 max-w-md rounded-lg border border-cyan-900/40 bg-cyan-950/20 px-5 py-3 text-center backdrop-blur-sm">
-          <p className="font-mono text-xs italic text-cyan-300/70">
+        <div className="relative z-10 mx-auto mt-8 max-w-md rounded-lg border border-orange-900/40 bg-orange-950/20 px-5 py-3 text-center backdrop-blur-sm">
+          <p className="font-mono text-xs italic text-orange-300/70">
             &ldquo;{lastTranscription}&rdquo;
           </p>
         </div>
       )}
 
       {/* Footer hint */}
-      <p className="absolute bottom-8 left-0 right-0 z-10 text-center font-mono text-[10px] uppercase tracking-widest text-cyan-800/40">
+      <p className="absolute bottom-8 left-0 right-0 z-10 text-center font-mono text-[10px] uppercase tracking-widest text-orange-800/40">
         Press Esc to close
       </p>
     </div>

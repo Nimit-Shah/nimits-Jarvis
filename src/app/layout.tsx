@@ -1,17 +1,17 @@
 import "~/styles/globals.css";
 
 import { type Metadata } from "next";
-import { IBM_Plex_Mono, Inter } from "next/font/google";
+import { Fira_Code, Oxanium } from "next/font/google";
 import { Toaster } from "sonner";
 import { TRPCReactProvider } from "~/clients/trpc";
 import { ThemeProvider } from "~/components/core/theme-provider";
 
-const primary = Inter({
+const primary = Oxanium({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
 });
-const code = IBM_Plex_Mono({
+const code = Fira_Code({
   subsets: ["latin"],
   variable: "--font-ibm-plex-mono",
   weight: ["400", "500", "600", "700"],

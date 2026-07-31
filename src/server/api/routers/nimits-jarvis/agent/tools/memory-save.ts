@@ -11,12 +11,12 @@ import { env } from "~/env";
  * The pgvector insert above is the primary durable store; Mnemosyne is the
  * primary *search* layer with hybrid FTS5 + vector scoring.
  */
-async function sendToMnemosyne(content: string): Promise<void> {
+async function sendToMnemosyne(content: string, instanceId: string): Promise<void> {
   try {
     await fetch(`${env.MNEMOSYNE_URL}/remember`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: content, importance: 0.8, source: "conversation" }),
+      body: JSON.stringify({ text: content, importance: 0.8, source: "conversation", instanceId }),
       signal: AbortSignal.timeout(3000), // 3s max — non-blocking
     });
   } catch {
@@ -47,7 +47,7 @@ export function createMemorySaveTool(
 
       // ── Secondary store: Mnemosyne (fire-and-forget) ──────────────────────
       // Does NOT block the response — runs after we return from execute().
-      void sendToMnemosyne(content);
+      void sendToMnemosyne(content, instanceId);
 
       return { saved: true, content };
     },

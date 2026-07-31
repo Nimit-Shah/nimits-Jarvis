@@ -103,6 +103,7 @@ async function executeJobs(
         select: { id: true },
       });
       if (!firstChat) {
+        console.error(`[cron/execute] No chat found for instance ${instanceId}; job IDs: ${allowedJobs.map(j => j.id).join(", ")}`);
         await releaseJobLocks(allowedJobs, invocationId, now, "No chat found for instance");
         return;
       }

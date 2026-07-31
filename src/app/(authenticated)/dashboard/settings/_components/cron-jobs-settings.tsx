@@ -126,12 +126,7 @@ export function CronJobsSettings() {
                 <div className="flex items-center gap-2 self-end sm:self-center">
                   <Switch
                     checked={job.enabled}
-                    onCheckedChange={(checked) =>
-                      void toggleCronJob.mutateAsync({
-                        jobId: job.id,
-                        enabled: checked,
-                      })
-                    }
+                    onCheckedChange={(checked) => handleToggle(job.id, checked)}
                     disabled={toggleCronJob.isPending}
                   />
                   <AlertDialog
@@ -148,7 +143,7 @@ export function CronJobsSettings() {
                     title="Delete Cron Job"
                     description={`This will permanently delete the scheduled task: "${job.prompt}"`}
                     confirmLabel="Delete"
-                    onConfirm={() => void deleteCronJob.mutateAsync({ jobId: job.id })}
+                    onConfirm={() => handleDelete(job.id)}
                     isPending={deleteCronJob.isPending}
                   />
                 </div>

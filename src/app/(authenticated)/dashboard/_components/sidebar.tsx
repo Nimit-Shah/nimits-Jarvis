@@ -127,18 +127,36 @@ export function Sidebar() {
     }
   }, [deleteTarget, deleteChatMut]);
 
-  const handleProjectSwitch = (id: string) => {
+  const handleProjectSwitch = async (id: string) => {
     if (id === activeInstanceId) {
       setProjectOpen(false);
       return;
     }
+    
+    // Update instance ID in URL and localStorage
     const params = new URLSearchParams(searchParams.toString());
     params.set("instance", id);
     params.delete("chat");
-    router.push(`/dashboard?${params.toString()}`, { scroll: false });
+    
     try { localStorage.setItem("nimits-jarvis-active-instance", id); } catch {}
+    
+    // Invalidate and refetch data for new instance
     void utils.nimitsJarvis.getInstance.invalidate();
     void utils.chats.list.invalidate();
+    
+    // Fetch chats for the new project
+    const newChats = await utils.chats.list.fetch({ instanceId: id });
+    
+    // Navigate to the most recent chat if available
+    if (newChats && newChats.length > 0) {
+      const mostRecentChat = newChats[0];
+      if (mostRecentChat) {
+        params.set("chat", mostRecentChat.id);
+        try { localStorage.setItem("nimits-jarvis-active-chat", mostRecentChat.id); } catch {}
+      }
+    }
+    
+    router.push(`/dashboard?${params.toString()}`, { scroll: false });
     setProjectOpen(false);
   };
 
@@ -225,20 +243,6 @@ export function Sidebar() {
 
         {/* Navigation */}
         <div className="shrink-0 space-y-0.5 mb-2">
-          <Link href={`/dashboard${instanceQs}`} className="block">
-            <Button
-              variant={pathname === "/dashboard" && !searchParams.get("chat") ? "secondary" : "ghost"}
-              size="sm"
-              className={cn(
-                "w-full h-8 justify-start gap-2 text-xs text-muted-foreground",
-                isCollapsed && "justify-center px-0",
-              )}
-            >
-              <MessageSquare className="size-3.5" />
-              {!isCollapsed && <span>Home</span>}
-            </Button>
-          </Link>
-
           <button
             onClick={() => setIsSearchOpen(true)}
             className={cn(

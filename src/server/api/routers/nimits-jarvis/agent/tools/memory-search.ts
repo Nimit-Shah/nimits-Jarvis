@@ -38,12 +38,13 @@ const mnemosyneRecallResult = z.object({
 async function queryMnemosyne(
   query: string,
   topK: number,
+  instanceId: string,
 ): Promise<Array<{ content: string; relevance: number }> | null> {
   try {
     const res = await fetch(`${env.MNEMOSYNE_URL}/recall`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, top_k: topK }),
+      body: JSON.stringify({ query, top_k: topK, instanceId }),
       signal: AbortSignal.timeout(4000),
     });
     if (!res.ok) return null;
@@ -105,7 +106,7 @@ export function createMemorySearchTool(instanceId: string): Tool<
       const limit = maxResults ?? 5;
 
       // ── Primary: Mnemosyne hybrid search ─────────────────────────────────
-      const mnResults = await queryMnemosyne(query, limit);
+      const mnResults = await queryMnemosyne(query, limit, instanceId);
       if (mnResults !== null) {
         return { found: mnResults.length > 0, memories: mnResults };
       }
@@ -129,7 +130,7 @@ export async function searchMemoriesForContext(
 ): Promise<string[]> {
   try {
     // ── Primary: Mnemosyne ────────────────────────────────────────────────
-    const mnResults = await queryMnemosyne(query, maxResults);
+    const mnResults = await queryMnemosyne(query, maxResults, instanceId);
     if (mnResults !== null) {
       return mnResults.map((r) => r.content);
     }

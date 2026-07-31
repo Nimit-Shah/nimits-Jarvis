@@ -29,6 +29,7 @@ export interface ToolCallEntry {
 export interface ToolCallsSectionProps {
   toolCalls: ToolCallEntry[];
   reasoningTexts?: string[];
+  chainItems?: Array<{ type: "reasoning"; text: string } | { type: "tool-call"; part: unknown }>;
   maxIconsToShow?: number;
   defaultExpanded?: boolean;
   className?: string;
@@ -42,6 +43,7 @@ export interface ToolCallsSectionProps {
 export function ToolCallsSection({
   toolCalls,
   reasoningTexts = [],
+  chainItems,
   maxIconsToShow = 10,
   defaultExpanded = false,
   className,
@@ -60,16 +62,41 @@ export function ToolCallsSection({
     });
   }, []);
 
-  const handleCopy = useCallback((call: ToolCallEntry, index: number) => {
-    const data = {
-      tool: call.tool_name,
-      inputs: call.inputs,
-      output: call.output,
-    };
-    void navigator.clipboard.writeText(JSON.stringify(data, null, 2));
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex(null), 2000);
-  }, []);
+const handleCopy = useCallback((call: ToolCallEntry, index: number) => {
+  const data = {
+    tool: call.tool_name,
+    inputs: call.inputs,
+    output: call.output,
+  };
+  void navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+  setCopiedIndex(index);
+  setTimeout(() => setCopiedIndex(null), 2000);
+}, []);
+
+// Helper to map chain part to ToolCallEntry
+function mapChainPartToEntry(part: unknown): ToolCallEntry {
+  const p = part as { tool_name?: string; tool_category?: string; state?: string; input?: Record<string, unknown>; output?: unknown; message?: string };
+  const rawName = p.tool_name ?? "unknown";
+  const displayName = rawName.replace(/^(COMPOSIO_|RUBE_)/, "");
+  
+  let state: ToolCallEntry["state"];
+  if (p.state === "input-streaming" || p.state === "input-available") {
+    state = p.state;
+  } else if (p.state === "output-available") {
+    state = "output-available";
+  } else if (p.state === "output-error") {
+    state = "output-error";
+  }
+
+  return {
+    tool_name: rawName,
+    tool_category: p.tool_category ?? "general",
+    message: p.message ?? (state === "input-streaming" || state === "input-available" ? `Using ${displayName}...` : `Used ${displayName}`),
+    inputs: p.input,
+    output: p.output ? (typeof p.output === "string" ? p.output : JSON.stringify(p.output, null, 2)) : undefined,
+    state,
+  };
+}
 
   // Deduplicate icons by category for stacked view
   const uniqueIcons = useMemo(() => {
@@ -158,117 +185,186 @@ export function ToolCallsSection({
         )}
       >
         <div className="space-y-0 pt-1">
-          {toolCalls.map((call, index) => {
-            const cat = getToolCategory(call.tool_name);
-            const displayName = formatToolName(call.tool_name);
-            const hasDetails = call.inputs || call.output;
-            const isCallExpanded = expandedCalls.has(index);
-            const isCallRunning =
-              call.state === "input-streaming" || call.state === "input-available";
-            const isCallError = call.state === "output-error";
+          {chainItems && chainItems.length > 0 ? (
+            // Interleaved rendering: reasoning and tool calls in order
+            chainItems.map((item, index) => {
+              if (item.type === "reasoning") {
+                // Render reasoning text inline
+                return (
+                  <div key={`reasoning-${index}`} className="flex items-stretch gap-2">
+                    <div className="flex flex-col items-center self-stretch">
+                      <div className="flex min-h-7 min-w-7 items-center justify-center shrink-0">
+                        <div className="size-2 rounded-full bg-muted-foreground/30" />
+                      </div>
+                      {index < chainItems.length - 1 && (
+                        <div className="w-px flex-1 bg-border/40 min-h-3" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0 pb-2">
+                      <p className="text-[11px] text-muted-foreground/60 leading-relaxed pl-2 italic">
+                        {item.text}
+                      </p>
+                    </div>
+                  </div>
+                );
+              }
+              
+              // Render tool call
+              const call = mapChainPartToEntry(item.part);
+              const cat = getToolCategory(call.tool_name);
+              const displayName = formatToolName(call.tool_name);
+              const hasDetails = call.inputs || call.output;
+              const isCallExpanded = expandedCalls.has(index);
+              const isCallRunning = call.state === "input-streaming" || call.state === "input-available";
+              const isCallError = call.state === "output-error";
 
-            return (
-              <div key={`${call.tool_name}-step-${index}`} className="flex items-stretch gap-2">
-                {/* Icon column with connector */}
-                <div className="flex flex-col items-center self-stretch">
-                  <div className="flex min-h-7 min-w-7 items-center justify-center shrink-0">
-                    {isCallRunning ? (
-                      <Loader2 className="size-4 animate-spin text-chart-4" />
-                    ) : isCallError ? (
-                      <XCircle className="size-4 text-destructive" />
-                    ) : (
-                      <ToolIcon category={cat} size={20} className="rounded-md" />
+              return (
+                <div key={`${call.tool_name}-step-${index}`} className="flex items-stretch gap-2">
+                  <div className="flex flex-col items-center self-stretch">
+                    <div className="flex min-h-7 min-w-7 items-center justify-center shrink-0">
+                      {isCallRunning ? (
+                        <Loader2 className="size-4 animate-spin text-chart-4" />
+                      ) : isCallError ? (
+                        <XCircle className="size-4 text-destructive" />
+                      ) : (
+                        <ToolIcon category={cat} size={20} className="rounded-md" />
+                      )}
+                    </div>
+                    {index < chainItems.length - 1 && (
+                      <div className="w-px flex-1 bg-border/40 min-h-3" />
                     )}
                   </div>
-                  {index < toolCalls.length - 1 && (
-                    <div className="w-px flex-1 bg-border/40 min-h-3" />
-                  )}
-                </div>
-
-                {/* Content column */}
-                <div className="flex-1 min-w-0 pb-2">
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      className={cn(
-                        "flex items-center gap-1 group/tool",
-                        hasDetails && "cursor-pointer",
-                      )}
-                      onClick={() => hasDetails && toggleCallExpansion(index)}
-                    >
-                      <span className="text-[12px] text-muted-foreground font-medium group-hover/tool:text-foreground transition-colors">
-                        {call.message || displayName}
-                      </span>
-                      {hasDetails && (
-                        <ChevronDown
-                          className={cn(
-                            "size-3 text-muted-foreground/50 transition-transform duration-150",
-                            isCallExpanded && "rotate-180",
-                          )}
-                        />
-                      )}
-                    </button>
-
-                    {/* Copy button */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleCopy(call, index);
-                      }}
-                      className="opacity-0 group-hover/tool:opacity-100 transition-opacity text-muted-foreground/40 hover:text-muted-foreground"
-                    >
-                      {copiedIndex === index ? (
-                        <Check className="size-3 text-chart-2" />
-                      ) : (
-                        <Copy className="size-3" />
-                      )}
-                    </button>
-                  </div>
-
-                  {/* Expanded details */}
-                  {isCallExpanded && hasDetails && (
-                    <div className="mt-1.5 rounded-lg border border-border/30 bg-muted/20 p-2.5 max-h-48 overflow-y-auto">
-                      {call.inputs && Object.keys(call.inputs).length > 0 && (
-                        <div className="relative">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-medium text-chart-4">Input</span>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void navigator.clipboard.writeText(
-                                  JSON.stringify(call.inputs, null, 2),
-                                );
-                              }}
-                              className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-                            >
-                              <Copy className="size-3" />
-                            </button>
+                  <div className="flex-1 min-w-0 pb-2">
+                    <div className={cn(
+                      "flex items-center gap-1 rounded-md px-2 py-1",
+                      isCallError && "border border-destructive/50 bg-destructive/5",
+                    )}>
+                      <button
+                        type="button"
+                        className={cn("flex items-center gap-1 group/tool", hasDetails && "cursor-pointer")}
+                        onClick={() => hasDetails && toggleCallExpansion(index)}
+                      >
+                        <span className={cn(
+                          "text-[12px] font-medium group-hover/tool:text-foreground transition-colors",
+                          isCallError ? "text-destructive" : "text-muted-foreground",
+                        )}>
+                          {isCallError ? (call.message || `Failed: ${displayName}`) : (call.message || displayName)}
+                        </span>
+                        {hasDetails && (
+                          <ChevronDown className={cn("size-3 text-muted-foreground/50 transition-transform duration-150", isCallExpanded && "rotate-180")} />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); handleCopy(call, index); }}
+                        className="opacity-0 group-hover/tool:opacity-100 transition-opacity text-muted-foreground/40 hover:text-muted-foreground"
+                      >
+                        {copiedIndex === index ? <Check className="size-3 text-chart-2" /> : <Copy className="size-3" />}
+                      </button>
+                    </div>
+                    {isCallExpanded && hasDetails && (
+                      <div className={cn(
+                        "mt-1.5 rounded-lg border p-2.5 max-h-48 overflow-y-auto",
+                        isCallError ? "border-destructive/30 bg-destructive/5" : "border-border/30 bg-muted/20",
+                      )}>
+                        {call.inputs && Object.keys(call.inputs).length > 0 && (
+                          <div className="relative">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-medium text-chart-4">Input</span>
+                              <button type="button" onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(JSON.stringify(call.inputs, null, 2)); }} className="text-muted-foreground/40 hover:text-muted-foreground transition-colors">
+                                <Copy className="size-3" />
+                              </button>
+                            </div>
+                            <CompactMarkdown content={call.inputs} />
                           </div>
-                          <CompactMarkdown content={call.inputs} />
-                        </div>
+                        )}
+                        {call.output && (
+                          <div className={cn(call.inputs && "mt-2 border-t pt-2", isCallError ? "border-destructive/30" : "border-border/30")}>
+                            <span className={cn("text-[10px] font-medium", isCallError ? "text-destructive" : "text-chart-2")}>{isCallError ? "Error" : "Output"}</span>
+                            <CompactMarkdown content={call.output} />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            // Fallback: legacy rendering (tool calls only, then reasoning)
+            <>
+              {toolCalls.map((call, index) => {
+                const cat = getToolCategory(call.tool_name);
+                const displayName = formatToolName(call.tool_name);
+                const hasDetails = call.inputs || call.output;
+                const isCallExpanded = expandedCalls.has(index);
+                const isCallRunning = call.state === "input-streaming" || call.state === "input-available";
+                const isCallError = call.state === "output-error";
+
+                return (
+                  <div key={`${call.tool_name}-step-${index}`} className="flex items-stretch gap-2">
+                    <div className="flex flex-col items-center self-stretch">
+                      <div className="flex min-h-7 min-w-7 items-center justify-center shrink-0">
+                        {isCallRunning ? (
+                          <Loader2 className="size-4 animate-spin text-chart-4" />
+                        ) : isCallError ? (
+                          <XCircle className="size-4 text-destructive" />
+                        ) : (
+                          <ToolIcon category={cat} size={20} className="rounded-md" />
+                        )}
+                      </div>
+                      {index < toolCalls.length - 1 && (
+                        <div className="w-px flex-1 bg-border/40 min-h-3" />
                       )}
-                      {call.output && (
-                        <div className={cn(call.inputs && "mt-2 border-t border-border/30 pt-2")}>
-                          <span className="text-[10px] font-medium text-chart-2">Output</span>
-                          <CompactMarkdown content={call.output} />
+                    </div>
+                    <div className="flex-1 min-w-0 pb-2">
+                      <div className={cn(
+                        "flex items-center gap-1 rounded-md px-2 py-1",
+                        isCallError && "border border-destructive/50 bg-destructive/5",
+                      )}>
+                        <button type="button" className={cn("flex items-center gap-1 group/tool", hasDetails && "cursor-pointer")} onClick={() => hasDetails && toggleCallExpansion(index)}>
+                          <span className={cn("text-[12px] font-medium group-hover/tool:text-foreground transition-colors", isCallError ? "text-destructive" : "text-muted-foreground")}>
+                            {isCallError ? (call.message || `Failed: ${displayName}`) : (call.message || displayName)}
+                          </span>
+                          {hasDetails && <ChevronDown className={cn("size-3 text-muted-foreground/50 transition-transform duration-150", isCallExpanded && "rotate-180")} />}
+                        </button>
+                        <button type="button" onClick={(e) => { e.stopPropagation(); handleCopy(call, index); }} className="opacity-0 group-hover/tool:opacity-100 transition-opacity text-muted-foreground/40 hover:text-muted-foreground">
+                          {copiedIndex === index ? <Check className="size-3 text-chart-2" /> : <Copy className="size-3" />}
+                        </button>
+                      </div>
+                      {isCallExpanded && hasDetails && (
+                        <div className={cn("mt-1.5 rounded-lg border p-2.5 max-h-48 overflow-y-auto", isCallError ? "border-destructive/30 bg-destructive/5" : "border-border/30 bg-muted/20")}>
+                          {call.inputs && Object.keys(call.inputs).length > 0 && (
+                            <div className="relative">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-medium text-chart-4">Input</span>
+                                <button type="button" onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(JSON.stringify(call.inputs, null, 2)); }} className="text-muted-foreground/40 hover:text-muted-foreground transition-colors">
+                                  <Copy className="size-3" />
+                                </button>
+                              </div>
+                              <CompactMarkdown content={call.inputs} />
+                            </div>
+                          )}
+                          {call.output && (
+                            <div className={cn(call.inputs && "mt-2 border-t pt-2", isCallError ? "border-destructive/30" : "border-border/30")}>
+                              <span className={cn("text-[10px] font-medium", isCallError ? "text-destructive" : "text-chart-2")}>{isCallError ? "Error" : "Output"}</span>
+                              <CompactMarkdown content={call.output} />
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
-                  )}
+                  </div>
+                );
+              })}
+              {reasoningTexts.length > 0 && (
+                <div className="pl-7 pt-1 pb-1">
+                  <p className="text-[11px] text-muted-foreground/50 leading-relaxed">
+                    {reasoningTexts.filter(Boolean).join("\n")}
+                  </p>
                 </div>
-              </div>
-            );
-          })}
-
-          {/* Reasoning text — rendered after all tools */}
-          {reasoningTexts.length > 0 && (
-            <div className="pl-7 pt-1 pb-1">
-              <p className="text-[11px] text-muted-foreground/50 leading-relaxed">
-                {reasoningTexts.filter(Boolean).join("\n")}
-              </p>
-            </div>
+              )}
+            </>
           )}
         </div>
       </div>

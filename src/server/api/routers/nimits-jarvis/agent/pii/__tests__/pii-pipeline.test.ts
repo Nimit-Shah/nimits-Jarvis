@@ -2,7 +2,7 @@ import { PIIVault, containsTokenPattern, isTokenString } from "../pii-tokenizer"
 import { PIITransportShield } from "../pii-transport-shield";
 import { scanForPII, scanForPIIEnhanced, extractStructuredPII } from "../pii-scanner";
 import { IdentityRegistry } from "../identity-registry";
-import { classifyPII } from "../deberta-classifier";
+import { classifyPII, resetDeBERTa, forceCircuitOpen } from "../deberta-classifier";
 
 // ─── Test Helpers ─────────────────────────────────────────────────
 
@@ -504,14 +504,25 @@ async function runAllTests() {
   // ── DeBERTa Fail-Closed ──
   console.log("\n=== DeBERTa Fail-Closed ===\n");
 
-  await runTest("classifyPII throws on unavailable model", async () => {
+  await runTest("classifyPII throws when circuit is open", async () => {
+    forceCircuitOpen();
     let threw = false;
     try {
       await classifyPII("This is a test sentence with enough length to trigger classification.");
     } catch {
       threw = true;
     }
-    assert(threw, "classifyPII should throw when model is unavailable (no silent [] return)");
+    assert(threw, "classifyPII should throw when circuit is open (fail-closed)");
+    resetDeBERTa();
+  });
+
+  await runTest("classifyPII succeeds when model is available", async () => {
+    // Model should be available (cached); verify it returns real results not []
+    // This also implicitly re-loads the model after circuit-open reset above
+    const result = await classifyPII("My name is John Smith. I live in Chicago.");
+    assert(Array.isArray(result), "classifyPII should return results array when model works");
+    // With valid PII text, DeBERTa should detect something
+    assert(result.length > 0, `expected at least 1 PII detection, got ${result.length}`);
   });
 
   // ── Summary ──

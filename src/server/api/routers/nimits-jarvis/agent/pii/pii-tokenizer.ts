@@ -208,7 +208,13 @@ export class PIIVault {
       const result: Record<string, unknown> = {};
       const entries = Object.entries(value as Record<string, unknown>);
       for (const [key, val] of entries) {
-        result[key] = await this.deepRedact(val, depth + 1);
+        const lowerKey = key.toLowerCase();
+        if (SYSTEM_METADATA_KEYS.has(lowerKey)) {
+          // Bypass PII scanning for structural API metadata, tool slugs, and schemas
+          result[key] = val;
+        } else {
+          result[key] = await this.deepRedact(val, depth + 1);
+        }
       }
       return result;
     }
@@ -247,22 +253,27 @@ export class PIIVault {
   private async redactString(text: string): Promise<string> {
     if (!text || text.length < 3) return text;
 
-    // Step 1: Replace known PII values (registered from structured extraction).
-    // Sort by original length descending so longer strings are replaced first,
-    // preventing substring corruption (e.g., "Johnson" before "John").
+    // Step 1: Replace known PII values (registered from structural extraction).
+    // Sort by original length descending so longer strings are replaced first.
+    // Use word boundaries for word/alphanumeric strings to avoid substring corruption
+    // (e.g., prevents "coun" from replacing inside "Country" or "County").
     let result = text;
     const sortedMappings = [...this.mappings].sort(
       (a, b) => b.original.length - a.original.length,
     );
     for (const mapping of sortedMappings) {
-      if (result.includes(mapping.original)) {
-        result = result.split(mapping.original).join(mapping.token);
+      const orig = mapping.original;
+      if (!result.includes(orig)) continue;
+
+      if (/^\w+$/.test(orig)) {
+        const regex = new RegExp(`\\b${escapeRegExp(orig)}\\b`, "g");
+        result = result.replace(regex, mapping.token);
+      } else {
+        result = result.split(orig).join(mapping.token);
       }
     }
 
     // Step 2: Scan for new PII patterns in the (partially redacted) text
-    // We re-scan because the text may contain PII that wasn't in the
-    // structured fields (e.g. email addresses in a message body).
     const newMatches = await scanForPIIEnhanced(result);
     if (newMatches.length === 0) return result;
 
@@ -280,3 +291,68 @@ export class PIIVault {
     return result;
   }
 }
+
+/**
+ * Object key names representing structural API metadata, tool definitions, schemas,
+ * multi-language translations (local_names), or technical IDs that must NEVER be
+ * modified by PII redaction or tokenization.
+ */
+const SYSTEM_METADATA_KEYS = new Set([
+  // Tool definition / schema metadata
+  "tool_slug",
+  "toolslug",
+  "toolname",
+  "tool_name",
+  "toolcallid",
+  "tool_call_id",
+  "action",
+  "parameters",
+  "schema",
+  "properties",
+  "enum",
+  "required",
+  "description",
+  "type",
+  "format",
+  "arguments",
+  // Geographic / API response translation dicts & metadata
+  "local_names",
+  "localnames",
+  "name_ascii",
+  "country_code",
+  "countrycode",
+  "country",
+  "state_code",
+  "iso3166",
+  "lat",
+  "lon",
+  "icon",
+  "weather",
+  // Technical / API pagination / system & account IDs
+  "nextpagetoken",
+  "pagetoken",
+  "threadid",
+  "messageid",
+  "historyid",
+  "plan_id",
+  "auth_config_id",
+  "authconfigid",
+  "connected_account_id",
+  "connectedaccountid",
+  "user_id",
+  "userid",
+  "account_id",
+  "accountid",
+  "display_url",
+  "file_path",
+  "mimetype",
+  "mime_type",
+  "code",
+  "status",
+  "etag",
+]);
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+}
+

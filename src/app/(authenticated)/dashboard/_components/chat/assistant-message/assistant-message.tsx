@@ -102,6 +102,7 @@ export function AssistantMessage({
 
   const segments = segmentParts(message.parts);
 
+  // Extract tool calls and reasoning in order
   const toolCalls = segments
     .filter((s): s is Extract<MessageSegment, { kind: "tool-call" }> => s.kind === "tool-call")
     .map((s) => s.part);
@@ -116,7 +117,24 @@ export function AssistantMessage({
 
   const isRunning = status === "streaming" || status === "submitted";
 
+  // Build ordered chain of reasoning + tool calls for hierarchy display
   const reasoningTexts = reasoningSegments.map((s) => s.part.text);
+  
+  // Create interleaved items for proper ordering
+  type ChainItem = 
+    | { type: "reasoning"; text: string }
+    | { type: "tool-call"; part: DynamicToolUIPart | ToolUIPart };
+  
+  const chainItems: ChainItem[] = segments
+    .filter((s): s is Extract<MessageSegment, { kind: "reasoning" }> | Extract<MessageSegment, { kind: "tool-call" }> => 
+      s.kind === "reasoning" || s.kind === "tool-call"
+    )
+    .map((s) => {
+      if (s.kind === "reasoning") {
+        return { type: "reasoning" as const, text: s.part.text };
+      }
+      return { type: "tool-call" as const, part: s.part };
+    });
 
   const getFullTextContent = () =>
     textSegments
@@ -156,6 +174,7 @@ export function AssistantMessage({
         <ToolCallsSection
           toolCalls={toolCalls.map(mapToToolCallEntry)}
           reasoningTexts={reasoningTexts}
+          chainItems={chainItems}
         />
       )}
 

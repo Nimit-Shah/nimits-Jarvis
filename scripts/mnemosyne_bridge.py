@@ -66,17 +66,29 @@ def _get_profile_db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ai_profile (
-            key TEXT PRIMARY KEY,
+            key TEXT NOT NULL,
             category TEXT NOT NULL,
             label TEXT NOT NULL,
             value TEXT NOT NULL,
             importance REAL NOT NULL DEFAULT 0.9,
             source_memory TEXT,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            instance_id TEXT DEFAULT 'default',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (key, instance_id)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_category ON ai_profile(category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_profile_instance ON ai_profile(instance_id)")
     conn.commit()
+    
+    # Migrate existing data: add instance_id column if missing (for existing DBs)
+    try:
+        conn.execute("SELECT instance_id FROM ai_profile LIMIT 1")
+    except sqlite3.OperationalError:
+        # Column doesn't exist, add it and migrate existing data
+        conn.execute("ALTER TABLE ai_profile ADD COLUMN instance_id TEXT DEFAULT 'default'")
+        conn.commit()
+    
     return conn
 
 
@@ -207,26 +219,27 @@ def classify_personal_info(text: str) -> list[dict]:
     return list(deduped.values())
 
 
-def upsert_profile(conn: sqlite3.Connection, facts: list[dict], source: str) -> None:
+def upsert_profile(conn: sqlite3.Connection, facts: list[dict], source: str, instance_id: str = "default") -> None:
     for fact in facts:
         conn.execute("""
-            INSERT INTO ai_profile (key, category, label, value, importance, source_memory, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(key) DO UPDATE SET
+            INSERT INTO ai_profile (key, category, label, value, importance, source_memory, instance_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(key, instance_id) DO UPDATE SET
                 value = excluded.value,
                 importance = excluded.importance,
                 source_memory = excluded.source_memory,
                 updated_at = datetime('now')
-        """, (fact["key"], fact["category"], fact["label"], fact["value"], fact["importance"], source[:500]))
+        """, (fact["key"], fact["category"], fact["label"], fact["value"], fact["importance"], source[:500], instance_id))
     conn.commit()
 
 
-def load_profile(conn: sqlite3.Connection) -> list[dict]:
+def load_profile(conn: sqlite3.Connection, instance_id: str = "default") -> list[dict]:
     cursor = conn.execute("""
         SELECT key, category, label, value, importance, updated_at
         FROM ai_profile
+        WHERE instance_id = ?
         ORDER BY category, importance DESC, updated_at DESC
-    """)
+    """, (instance_id,))
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
 
@@ -236,12 +249,14 @@ class RememberRequest(BaseModel):
     text: str
     importance: float = 0.8
     source: str = "conversation"
+    instanceId: Optional[str] = None
 
 
 class RecallRequest(BaseModel):
     query: str
     top_k: int = 5
     temporal_weight: float = 0.3
+    instanceId: Optional[str] = None
 
 
 # ── FastAPI Application ────────────────────────────────────────────────────────
@@ -271,6 +286,9 @@ app.add_middleware(
 @app.post("/remember")
 def store_memory(req: RememberRequest):
     """Store memory in Mnemosyne + run profile classifier."""
+    # Use provided instanceId or default
+    instance_id = req.instanceId or "default"
+    
     # 1. Save into Mnemosyne BEAM (if available)
     if HAS_MNEMOSYNE:
         try:
@@ -288,7 +306,7 @@ def store_memory(req: RememberRequest):
     if facts:
         try:
             conn = _get_profile_db()
-            upsert_profile(conn, facts, source=req.text)
+            upsert_profile(conn, facts, source=req.text, instance_id=instance_id)
             conn.close()
         except Exception as exc:
             logger.error("Profile upsert failed: %s", exc)
@@ -332,11 +350,11 @@ def retrieve_memory(req: RecallRequest):
 
 
 @app.get("/profile")
-def get_profile():
-    """Return the structured AI user profile extracted from saved memories."""
+def get_profile(instance_id: str = "default"):
+    """Return the structured AI user profile extracted from saved memories, filtered by instance."""
     try:
         conn = _get_profile_db()
-        items = load_profile(conn)
+        items = load_profile(conn, instance_id=instance_id)
         conn.close()
 
         # Group by category for easier frontend rendering
@@ -371,12 +389,12 @@ def consolidate():
 
 
 @app.get("/stats")
-def stats():
+def stats(instance_id: str = "default"):
     """Return Mnemosyne memory statistics."""
     profile_count = 0
     try:
         conn = _get_profile_db()
-        cursor = conn.execute("SELECT COUNT(*) FROM ai_profile")
+        cursor = conn.execute("SELECT COUNT(*) FROM ai_profile WHERE instance_id = ?", (instance_id,))
         profile_count = cursor.fetchone()[0]
         conn.close()
     except Exception:

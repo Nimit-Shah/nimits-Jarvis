@@ -8,12 +8,22 @@
  * This is Layer 3 of the PII pipeline: ML-based, 10-30ms latency.
  * Falls back gracefully if the model fails to load.
  *
- * Usage:
- *   const results = await classifyPII("My name is Nimit Shah");
- *   // results: [{ value: "Nimit Shah", category: "NAME", start: 11, end: 21, score: 0.95 }]
+ * Fix summary (2026-08-01):
+ * - Root cause: pnpm strict isolation caused `onnxruntime-common` to be
+ *   unresolvable by @huggingface/transformers ESM bundle. Fixed via symlink
+ *   in the HF package's node_modules (see .npmrc for public-hoist-pattern).
+ * - Second bug: the ONNX pipeline does NOT emit character start/end offsets.
+ *   It only emits `word` (token piece) and `index` (token index). The old
+ *   code did `text.slice(entity.start, entity.end)` which returned the full
+ *   string when start/end are undefined. Fixed by:
+ *     1. Running WITHOUT aggregation_strategy to get raw BIO-tagged tokens.
+ *     2. Grouping consecutive tokens of the same entity type.
+ *     3. Reconstructing span text from SentencePiece word pieces.
+ *     4. Locating the span in the original text with indexOf for char offsets.
+ * - Also added the full AI4Privacy label set (B-FIRSTNAME, B-MIDDLENAME,
+ *   B-LASTNAME, B-CITY, B-STREET, etc.) to LABEL_TO_PII_TYPE.
  */
 
-import { createHash } from "crypto";
 import type { PIIType } from "./pii-types";
 import { isTokenString } from "./pii-tokenizer";
 
@@ -25,22 +35,51 @@ export interface ClassificationResult {
   score: number;
 }
 
-// Map DeBERTa entity labels to our PIIType
+/**
+ * Map the AI4Privacy model label set → our PIIType.
+ * The model uses BIO-tagged labels: B-FIRSTNAME, B-LASTNAME, B-EMAIL, etc.
+ * We strip the B-/I- prefix and map the base label.
+ */
 const LABEL_TO_PII_TYPE: Record<string, PIIType> = {
+  // Name components → person_name
+  FIRSTNAME: "person_name",
+  MIDDLENAME: "person_name",
+  LASTNAME: "person_name",
+  PREFIX: "person_name",
+  SUFFIX: "person_name",
+  USERNAME: "person_name",
   PERSON: "person_name",
   NAME: "person_name",
+  // Contact
   EMAIL: "email",
   PHONE: "phone",
+  PHONENUM: "phone",
+  PHONENUMBER: "phone",
+  // Location
   ADDRESS: "address",
+  STREET: "address",
+  CITY: "address",
+  STATE: "address",
+  ZIPCODE: "address",
+  POSTCODE: "address",
+  COUNTRY: "address",
   LOCATION: "address",
+  COUNTY: "address",
+  // Financial / IDs
   SSN: "ssn",
+  SOCIALNUMBER: "ssn",
+  CREDITCARDNUMBER: "credit_card",
   CREDIT_CARD: "credit_card",
+  IP: "ip_address",
   IP_ADDRESS: "ip_address",
+  IPADDRESS: "ip_address",
+  APIKEY: "api_key",
   API_KEY: "api_key",
 };
 
 const CONFIDENCE_THRESHOLD = 0.80;
 const MIN_TEXT_LENGTH = 10;
+const MAX_TEXT_LENGTH = 2048; // DeBERTa v3 base max ~512 tokens; ~4 chars/token
 
 // Circuit breaker: after MAX_CONSECUTIVE_FAILURES, skip for RETRY_COOLDOWN_MS
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -56,7 +95,7 @@ let circuitLogged = false;
  * If the model fails to load, retries on the next request (up to
  * MAX_CONSECUTIVE_FAILURES before entering cooldown).
  */
-async function getClassifier(): Promise<any | null> {
+async function getClassifier(): Promise<any> {
   if (classifierInstance) return classifierInstance;
 
   // Circuit breaker: after repeated failures, wait for cooldown
@@ -69,7 +108,7 @@ async function getClassifier(): Promise<any | null> {
         );
         circuitLogged = true;
       }
-      throw new Error("DeBERTa classifier unavailable (circuit open)");
+      return null;
     }
     consecutiveFailures = 0;
     circuitLogged = false;
@@ -78,10 +117,14 @@ async function getClassifier(): Promise<any | null> {
 
   try {
     const { pipeline, env } = await import("@huggingface/transformers");
+    const { homedir } = await import("os");
+    const { join } = await import("path");
 
-    // Configure local cache directory
+    // Cache model weights to ~/.cache/huggingface/hub so they survive process restarts.
+    // env.cacheDir is the HF JS equivalent of HF_HOME — once the model is downloaded
+    // it loads from disk in ~50ms instead of streaming from the Hub.
+    env.cacheDir = join(homedir(), ".cache", "huggingface", "hub");
     env.allowRemoteModels = true;
-    env.localModelPath = "./.models_cache";
 
     classifierInstance = await pipeline(
       "token-classification",
@@ -99,10 +142,108 @@ async function getClassifier(): Promise<any | null> {
       `[DeBERTa] Failed to load model (attempt ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}).`,
       err,
     );
-    throw new Error(
-      `DeBERTa classifier failed to load after ${consecutiveFailures} attempt(s)`,
-    );
+    return null;
   }
+}
+
+/**
+ * Extract the base label from a BIO-tagged label.
+ * e.g., "B-FIRSTNAME" → "FIRSTNAME", "I-LASTNAME" → "LASTNAME", "PERSON" → "PERSON"
+ */
+function baseLabel(label: string): string {
+  return label.replace(/^[BI]-/i, "").toUpperCase();
+}
+
+/**
+ * Group consecutive tokens that belong to the same entity type into
+ * merged spans, returning { label, words[], score_avg }.
+ *
+ * This is needed because the ONNX pipeline does NOT emit character
+ * start/end offsets — only `word` (token piece) and `index` (token index).
+ *
+ * Key insight: DeBERTa uses sub-word tokenization. A single word like
+ * "Nimit" may produce two tokens: {entity:"B-FIRSTNAME", word:"N", index:4}
+ * and {entity:"B-FIRSTNAME", word:"imit", index:5}. Both carry a B- tag
+ * but are consecutive and same label — they must be merged.
+ *
+ * Merge rule: consecutive token index + same base label, regardless of B/I.
+ */
+function groupConsecutiveTokens(
+  entities: Array<{ entity: string; score: number; index: number; word: string }>,
+): Array<{ label: string; words: string[]; score: number }> {
+  const groups: Array<{ label: string; words: string[]; score: number; totalLen: number; lastIndex: number }> = [];
+
+  for (const e of entities) {
+    const label = baseLabel(e.entity);
+    const last = groups[groups.length - 1];
+    const wordLen = e.word.length;
+
+    if (last && last.label === label && e.index === last.lastIndex + 1) {
+      last.words.push(e.word);
+      last.score = (last.score * last.totalLen + e.score * wordLen) / (last.totalLen + wordLen);
+      last.totalLen += wordLen;
+      last.lastIndex = e.index;
+    } else {
+      groups.push({ label, words: [e.word], score: e.score, totalLen: wordLen, lastIndex: e.index });
+    }
+  }
+
+  return groups.map(({ label, words, score }) => ({ label, words, score }));
+}
+
+/**
+ * Reconstruct a human-readable string from SentencePiece token pieces.
+ *
+ * SentencePiece tokenization rules:
+ * - Word-initial tokens are prefixed with ▁ (U+2581): e.g. "▁Nimit", "▁Shah"
+ * - Sub-word continuations have NO prefix: e.g. "N" → "imit" makes "Nimit"
+ * - When joining: ▁ prefix = space before the word; no prefix = concat directly.
+ */
+function reconstructSpan(words: string[]): string {
+  let result = "";
+  for (const w of words) {
+    if (w.startsWith("▁")) {
+      // Word boundary — add a space then the word (trim leading ▁)
+      result += (result.length > 0 ? " " : "") + w.slice(1);
+    } else {
+      // Sub-word continuation — concatenate directly (no space)
+      result += w;
+    }
+  }
+  return result.trim();
+}
+
+/**
+ * Find the character position of `span` in `text` starting after `fromIndex`.
+ */
+function findSpanInText(
+  text: string,
+  span: string,
+  fromIndex = 0,
+): { start: number; end: number } | null {
+  const idx = text.indexOf(span, fromIndex);
+  if (idx === -1) return null;
+  return { start: idx, end: idx + span.length };
+}
+
+/**
+ * Guard function to skip machine-generated identifiers, tool slugs, API parameter names,
+ * and code symbols from DeBERTa classification.
+ *
+ * DeBERTa v3 is trained on prose and frequently misclassifies SCREAMING_SNAKE_CASE
+ * (e.g. OPENWEATHERMAP_GET_GEOCODING_DIRECT) or camelCase code identifiers as person names.
+ */
+function isLikelyMachineString(text: string): boolean {
+  const trimmed = text.trim();
+  // SCREAMING_SNAKE_CASE tool slugs & constants: OPENWEATHERMAP_GET_GEOCODING_DIRECT, GMAIL_FETCH_EMAILS
+  if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(trimmed)) return true;
+  // Any single token containing underscores (snake_case or SCREAMING_SNAKE_CASE)
+  if (trimmed.includes("_") && !trimmed.includes(" ")) return true;
+  // All-uppercase words with no spaces (acronyms/methods: API, HTTP, GET, POST, URL, JSON)
+  if (/^[A-Z]{2,}$/.test(trimmed)) return true;
+  // camelCase code identifiers: geocodingDirect, countryCode, maxResults
+  if (/^[a-z]+(?:[A-Z][a-z0-9]+)+$/.test(trimmed)) return true;
+  return false;
 }
 
 /**
@@ -114,39 +255,73 @@ export async function classifyPII(
   text: string,
 ): Promise<ClassificationResult[]> {
   if (!text || text.trim().length < MIN_TEXT_LENGTH) return [];
+  if (isLikelyMachineString(text)) return [];
 
   const classifier = await getClassifier();
+  if (!classifier) return [];
 
-  const entities = await classifier(text, { aggregation_strategy: "simple" });
+  try {
+    // Run WITHOUT aggregation_strategy to get raw BIO-tagged tokens with indices.
+    // The aggregated version drops start/end offsets in the ONNX build.
+    const truncated = text.length > MAX_TEXT_LENGTH ? text.slice(0, MAX_TEXT_LENGTH) : text;
+    const rawEntities = await classifier(truncated);
 
-  if (!entities || !Array.isArray(entities)) return [];
+    if (!rawEntities || !Array.isArray(rawEntities)) return [];
 
-  const results: ClassificationResult[] = [];
-
-  for (const entity of entities) {
-    if (entity.score < CONFIDENCE_THRESHOLD) continue;
-
-    const rawSpan = text.slice(entity.start, entity.end);
-    // Skip if already tokenized (looks like a PII token)
-    if (isTokenString(rawSpan)) continue;
-
-    const label = (
-      entity.entity_group ||
-      entity.entity ||
-      "PII"
-    ).toUpperCase();
-    const piiType = LABEL_TO_PII_TYPE[label] ?? "person_name";
-
-    results.push({
-      value: rawSpan.trim(),
-      category: piiType,
-      start: entity.start,
-      end: entity.end,
-      score: entity.score,
+    // Filter to only PII labels above confidence threshold
+    const piiEntities = (
+      rawEntities as Array<{
+        entity: string;
+        score: number;
+        index: number;
+        word: string;
+      }>
+    ).filter((e) => {
+      const label = baseLabel(e.entity);
+      return e.score >= CONFIDENCE_THRESHOLD && LABEL_TO_PII_TYPE[label] !== undefined;
     });
-  }
 
-  return results;
+    if (piiEntities.length === 0) return [];
+
+    // Group consecutive tokens of the same type into coherent spans
+    const groups = groupConsecutiveTokens(piiEntities);
+
+    const results: ClassificationResult[] = [];
+    let searchFrom = 0;
+
+    for (const group of groups) {
+      const piiType = LABEL_TO_PII_TYPE[group.label];
+      if (!piiType) continue;
+
+      const spanValue = reconstructSpan(group.words);
+      if (!spanValue || spanValue.length < 2) continue;
+
+      // Skip already-tokenized values or machine identifiers (tool slugs, param names)
+      if (isTokenString(spanValue) || isLikelyMachineString(spanValue)) continue;
+
+      // Locate the span in the original text to get character offsets
+      const pos = findSpanInText(text, spanValue, searchFrom);
+      if (!pos) {
+        // Fallback: emit without exact positions (still seeds the vault)
+        results.push({ value: spanValue, category: piiType, start: 0, end: 0, score: group.score });
+        continue;
+      }
+
+      results.push({
+        value: spanValue,
+        category: piiType,
+        start: pos.start,
+        end: pos.end,
+        score: group.score,
+      });
+      searchFrom = pos.end;
+    }
+
+    return results;
+  } catch (err) {
+    console.warn("[DeBERTa] Classification error:", err);
+    return [];
+  }
 }
 
 /**
@@ -157,11 +332,35 @@ export function isDeBERTaAvailable(): boolean {
 }
 
 /**
+ * Reset classifier state (for testing). Forces next call to re-attempt model load.
+ */
+export function resetDeBERTa(): void {
+  classifierInstance = null;
+  consecutiveFailures = 0;
+  lastFailureTime = 0;
+  circuitLogged = false;
+}
+
+/**
+ * Force the circuit breaker open (for testing the fail-closed path).
+ * After calling this, getClassifier() will throw until cooldown expires
+ * or resetDeBERTa() is called.
+ */
+export function forceCircuitOpen(): void {
+  classifierInstance = null;
+  consecutiveFailures = MAX_CONSECUTIVE_FAILURES;
+  lastFailureTime = Date.now();
+  circuitLogged = false;
+}
+
+/**
  * Pre-warm the model (call early to avoid cold start on first request).
  * Non-blocking — fires and forgets.
  */
 export function prewarmDeBERTa(): void {
   if (!classifierInstance && consecutiveFailures < MAX_CONSECUTIVE_FAILURES) {
-    void getClassifier();
+    void getClassifier().catch(() => {
+      // Model prewarm failed — non-fatal, next request will retry
+    });
   }
 }

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { auth } from "~/server/auth";
 import { prepareAgentRun } from "~/server/api/routers/nimits-jarvis/agent/setup";
 import type { PIIVault } from "~/server/api/routers/nimits-jarvis/agent/pii";
+import { prewarmDeBERTa } from "~/server/api/routers/nimits-jarvis/agent/pii/deberta-classifier";
 import {
   setStreamingMessage,
   getStreamingMessage,
@@ -12,6 +13,9 @@ import { rateLimit } from "~/server/clients/rate-limit";
 import { getStreamContext } from "./stream-store";
 import { TRPCError } from "@trpc/server";
 import { getInstanceForUser } from "~/server/api/routers/nimits-jarvis/utils";
+
+// Pre-warm DeBERTa model on first request (non-blocking)
+let debertaPrewarmed = false;
 
 const chatRequestBody = z.object({
   messages: z.array(
@@ -150,6 +154,12 @@ function createPIIRestoreStringTransform(
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
+  // Pre-warm DeBERTa model on first request (non-blocking)
+  if (!debertaPrewarmed) {
+    debertaPrewarmed = true;
+    prewarmDeBERTa();
+  }
+
   const body = chatRequestBody.safeParse(await request.json());
   if (!body.success) {
     return new Response("Invalid request body", { status: 400 });

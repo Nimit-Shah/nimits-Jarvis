@@ -117,17 +117,19 @@ const PATTERNS: PatternEntry[] = [
     validate: passesLuhn,
   },
   { type: "ip_address", regex: IPV4_RE },
-  { type: "phone", regex: PHONE_RE, validate: (m, text, idx) => {
-    // Must have at least 10 digits to be a real phone number
-    const digits = m.replace(/\D/g, "");
-    if (digits.length < 10) return false;
-    // Reject if preceded by alphanumeric (resource ID like "c123456789036")
-    if (idx !== undefined && text && idx > 0) {
-      const prev = text.charAt(idx - 1);
-      if (/[a-zA-Z0-9]/.test(prev)) return false;
+  {
+    type: "phone", regex: PHONE_RE, validate: (m, text, idx) => {
+      // Must have at least 10 digits to be a real phone number
+      const digits = m.replace(/\D/g, "");
+      if (digits.length < 10) return false;
+      // Reject if preceded by alphanumeric (resource ID like "c123456789036")
+      if (idx !== undefined && text && idx > 0) {
+        const prev = text.charAt(idx - 1);
+        if (/[a-zA-Z0-9]/.test(prev)) return false;
+      }
+      return true;
     }
-    return true;
-  }},
+  },
   { type: "address", regex: ADDRESS_RE },
 ];
 
@@ -199,52 +201,52 @@ const PII_FIELD_PATHS: Array<{
   path: string[];
   type: PIIType;
 }> = [
-  // Email / Gmail
-  { path: ["from", "emailAddress", "name"], type: "person_name" },
-  { path: ["from", "emailAddress", "address"], type: "email" },
-  { path: ["sender", "emailAddress", "name"], type: "person_name" },
-  { path: ["sender", "emailAddress", "address"], type: "email" },
-  { path: ["toRecipients", "*", "emailAddress", "name"], type: "person_name" },
-  { path: ["toRecipients", "*", "emailAddress", "address"], type: "email" },
-  { path: ["ccRecipients", "*", "emailAddress", "name"], type: "person_name" },
-  { path: ["ccRecipients", "*", "emailAddress", "address"], type: "email" },
+    // Email / Gmail
+    { path: ["from", "emailAddress", "name"], type: "person_name" },
+    { path: ["from", "emailAddress", "address"], type: "email" },
+    { path: ["sender", "emailAddress", "name"], type: "person_name" },
+    { path: ["sender", "emailAddress", "address"], type: "email" },
+    { path: ["toRecipients", "*", "emailAddress", "name"], type: "person_name" },
+    { path: ["toRecipients", "*", "emailAddress", "address"], type: "email" },
+    { path: ["ccRecipients", "*", "emailAddress", "name"], type: "person_name" },
+    { path: ["ccRecipients", "*", "emailAddress", "address"], type: "email" },
 
-  // Gmail API format
-  { path: ["from"], type: "person_name" },
-  { path: ["to"], type: "person_name" },
-  { path: ["sender_email"], type: "email" },
-  { path: ["recipient_email"], type: "email" },
+    // Gmail API format
+    { path: ["from"], type: "person_name" },
+    { path: ["to"], type: "person_name" },
+    { path: ["sender_email"], type: "email" },
+    { path: ["recipient_email"], type: "email" },
 
-  // Calendar / Events
-  { path: ["attendees", "*", "name"], type: "person_name" },
-  { path: ["attendees", "*", "email"], type: "email" },
-  { path: ["organizer", "name"], type: "person_name" },
-  { path: ["organizer", "email"], type: "email" },
+    // Calendar / Events
+    { path: ["attendees", "*", "name"], type: "person_name" },
+    { path: ["attendees", "*", "email"], type: "email" },
+    { path: ["organizer", "name"], type: "person_name" },
+    { path: ["organizer", "email"], type: "email" },
 
-  // Contacts
-  { path: ["name"], type: "person_name" },
-  { path: ["displayName"], type: "person_name" },
-  { path: ["givenName"], type: "person_name" },
-  { path: ["surname"], type: "person_name" },
-  { path: ["emailAddresses", "*", "address"], type: "email" },
-  { path: ["phoneNumbers", "*", "number"], type: "phone" },
-  { path: ["homePhones", "*"], type: "phone" },
-  { path: ["mobilePhone"], type: "phone" },
-  { path: ["businessPhones", "*"], type: "phone" },
+    // Contacts
+    { path: ["name"], type: "person_name" },
+    { path: ["displayName"], type: "person_name" },
+    { path: ["givenName"], type: "person_name" },
+    { path: ["surname"], type: "person_name" },
+    { path: ["emailAddresses", "*", "address"], type: "email" },
+    { path: ["phoneNumbers", "*", "number"], type: "phone" },
+    { path: ["homePhones", "*"], type: "phone" },
+    { path: ["mobilePhone"], type: "phone" },
+    { path: ["businessPhones", "*"], type: "phone" },
 
-  // Gmail People API (people.get / people.searchDirectoryPeople)
-  { path: ["names", "*", "displayName"], type: "person_name" },
-  { path: ["names", "*", "givenName"], type: "person_name" },
-  { path: ["names", "*", "familyName"], type: "person_name" },
-  { path: ["emailAddresses", "*", "value"], type: "email" },
+    // Gmail People API (people.get / people.searchDirectoryPeople)
+    { path: ["names", "*", "displayName"], type: "person_name" },
+    { path: ["names", "*", "givenName"], type: "person_name" },
+    { path: ["names", "*", "familyName"], type: "person_name" },
+    { path: ["emailAddresses", "*", "value"], type: "email" },
 
-  // Slack / Discord
-  { path: ["author", "name"], type: "person_name" },
-  { path: ["user", "name"], type: "person_name" },
-  { path: ["user", "real_name"], type: "person_name" },
-  { path: ["user", "profile", "email"], type: "email" },
-  { path: ["user", "profile", "phone"], type: "phone" },
-];
+    // Slack / Discord
+    { path: ["author", "name"], type: "person_name" },
+    { path: ["user", "name"], type: "person_name" },
+    { path: ["user", "real_name"], type: "person_name" },
+    { path: ["user", "profile", "email"], type: "email" },
+    { path: ["user", "profile", "phone"], type: "phone" },
+  ];
 
 /**
  * Extracts PII values from known structured fields in Composio tool results.

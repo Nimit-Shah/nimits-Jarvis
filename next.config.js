@@ -77,8 +77,20 @@ const config = {
   // Transpile packages if needed
   transpilePackages: [],
 
-  // Keep these packages external to Next.js server-side bundling
-  serverExternalPackages: ["resumable-stream", "ioredis"],
+  // Keep these packages external to Next.js server-side bundling.
+  // Native Node.js addons (onnxruntime-node) and ESM-only packages like
+  // @huggingface/transformers MUST be external — webpack can't bundle native
+  // .node binaries or resolve the onnxruntime-common bare import inside the
+  // HF transformers ESM bundle when run through the Next.js bundler.
+  serverExternalPackages: [
+    "resumable-stream",
+    "ioredis",
+    "@huggingface/transformers",
+    "onnxruntime-node",
+    "onnxruntime-common",
+    "onnxruntime-web",
+    "sharp",
+  ],
 
   // Strict mode for better debugging
   typescript: {
