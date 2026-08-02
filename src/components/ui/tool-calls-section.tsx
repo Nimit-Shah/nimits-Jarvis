@@ -29,7 +29,7 @@ export interface ToolCallEntry {
 export interface ToolCallsSectionProps {
   toolCalls: ToolCallEntry[];
   reasoningTexts?: string[];
-  chainItems?: Array<{ type: "reasoning"; text: string } | { type: "tool-call"; part: unknown }>;
+  chainItems?: Array<{ type: "reasoning"; text: string } | { type: "tool-call"; entry: ToolCallEntry }>;
   maxIconsToShow?: number;
   defaultExpanded?: boolean;
   className?: string;
@@ -72,31 +72,6 @@ const handleCopy = useCallback((call: ToolCallEntry, index: number) => {
   setCopiedIndex(index);
   setTimeout(() => setCopiedIndex(null), 2000);
 }, []);
-
-// Helper to map chain part to ToolCallEntry
-function mapChainPartToEntry(part: unknown): ToolCallEntry {
-  const p = part as { tool_name?: string; tool_category?: string; state?: string; input?: Record<string, unknown>; output?: unknown; message?: string };
-  const rawName = p.tool_name ?? "unknown";
-  const displayName = rawName.replace(/^(COMPOSIO_|RUBE_)/, "");
-  
-  let state: ToolCallEntry["state"];
-  if (p.state === "input-streaming" || p.state === "input-available") {
-    state = p.state;
-  } else if (p.state === "output-available") {
-    state = "output-available";
-  } else if (p.state === "output-error") {
-    state = "output-error";
-  }
-
-  return {
-    tool_name: rawName,
-    tool_category: p.tool_category ?? "general",
-    message: p.message ?? (state === "input-streaming" || state === "input-available" ? `Using ${displayName}...` : `Used ${displayName}`),
-    inputs: p.input,
-    output: p.output ? (typeof p.output === "string" ? p.output : JSON.stringify(p.output, null, 2)) : undefined,
-    state,
-  };
-}
 
   // Deduplicate icons by category for stacked view
   const uniqueIcons = useMemo(() => {
@@ -210,7 +185,7 @@ function mapChainPartToEntry(part: unknown): ToolCallEntry {
               }
               
               // Render tool call
-              const call = mapChainPartToEntry(item.part);
+              const call = item.entry;
               const cat = getToolCategory(call.tool_name);
               const displayName = formatToolName(call.tool_name);
               const hasDetails = call.inputs || call.output;

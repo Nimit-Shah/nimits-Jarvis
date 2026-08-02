@@ -123,7 +123,7 @@ export function AssistantMessage({
   // Create interleaved items for proper ordering
   type ChainItem = 
     | { type: "reasoning"; text: string }
-    | { type: "tool-call"; part: DynamicToolUIPart | ToolUIPart };
+    | { type: "tool-call"; entry: ToolCallEntry };
   
   const chainItems: ChainItem[] = segments
     .filter((s): s is Extract<MessageSegment, { kind: "reasoning" }> | Extract<MessageSegment, { kind: "tool-call" }> => 
@@ -133,7 +133,7 @@ export function AssistantMessage({
       if (s.kind === "reasoning") {
         return { type: "reasoning" as const, text: s.part.text };
       }
-      return { type: "tool-call" as const, part: s.part };
+      return { type: "tool-call" as const, entry: mapToToolCallEntry(s.part) };
     });
 
   const getFullTextContent = () =>
