@@ -108,6 +108,13 @@ export class PIITransportShield {
       result.output = await this.vault.redactToolResult(result.output);
     }
 
+    // Reasoning/thinking text — match historical reasoning that was stored
+    // with real PII values (after B1 fix) and needs to be re-tokenized
+    // before the LLM sees it when replayed as context.
+    if (result.type === "reasoning" && typeof result.text === "string") {
+      result.text = await this.vault.redact(result.text);
+    }
+
     return result;
   }
 }

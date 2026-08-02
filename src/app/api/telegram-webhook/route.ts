@@ -7,6 +7,7 @@ import { rateLimit } from "~/server/clients/rate-limit";
 import { prepareAgentRun } from "~/server/api/routers/nimits-jarvis/agent/setup";
 import { stripToolResultEchoes } from "~/server/api/routers/nimits-jarvis/agent/strip-tool-echoes";
 import { toPlainRecordSafe } from "~/server/api/routers/nimits-jarvis/agent/context/build-context";
+import { toHuman, toHumanDeep, toModel } from "~/server/api/routers/nimits-jarvis/agent/pii/brands";
 import { parseManageConnectionsResult } from "~/app/(authenticated)/dashboard/_components/tool-results/connections/schema";
 import {
   claimTelegramUpdate,
@@ -198,7 +199,7 @@ async function handleRegularMessage(
     source: "telegram",
   });
 
-  const { agent, messages } = prepareResult.result;
+  const { agent, messages, piiVault } = prepareResult.result;
 
   let accumulatedText = "";
   const abortController = new AbortController();
@@ -219,7 +220,10 @@ async function handleRegularMessage(
         for (let i = 0; i < step.toolCalls.length; i++) {
           const tc = step.toolCalls[i]!;
           const tr = step.toolResults[i];
-          const tcInput = toPlainRecordSafe(tc.input);
+          // Restore PII tokens in tool call input before describing to the human
+          const tcInput = piiVault
+            ? (toHumanDeep(piiVault, toPlainRecordSafe(tc.input)) as Record<string, unknown>)
+            : toPlainRecordSafe(tc.input);
           const desc = describeToolCall({
             toolName: tc.toolName,
             input: tcInput,
@@ -230,8 +234,11 @@ async function handleRegularMessage(
           }
         }
 
-        // Send any text generated in this step
-        const stepText = stripToolResultEchoes(step.text).trim();
+        // Send any text generated in this step — restore PII tokens first
+        const rawStepText = stripToolResultEchoes(step.text).trim();
+        const stepText = piiVault
+          ? toHuman(piiVault, toModel(rawStepText))
+          : rawStepText;
         if (stepText) {
           accumulatedText += stepText;
           await sendTelegramMessage(chatId, stepText.slice(0, 4096));
@@ -241,7 +248,10 @@ async function handleRegularMessage(
     });
 
     // Send final text only if it wasn't already sent via onStepFinish
-    const finalText = stripToolResultEchoes(result.text).trim();
+    const rawFinalText = stripToolResultEchoes(result.text).trim();
+    const finalText = piiVault
+      ? toHuman(piiVault, toModel(rawFinalText))
+      : rawFinalText;
     if (!accumulatedText && finalText) {
       await sendTelegramMessage(chatId, finalText.slice(0, 4096));
     } else if (!accumulatedText && !finalText) {

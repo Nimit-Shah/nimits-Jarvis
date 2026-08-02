@@ -38,7 +38,7 @@ function canonicalizeForLookup(value: string): string {
 }
 
 /** True if text contains a PII token anywhere (not necessarily bounded by word boundaries) */
-const CONTAINS_TOKEN_RE = /(?:\[CLAW_[A-Z_]+_[A-F0-9]{4}\]|CLAW_EMAIL_[A-F0-9]{4}@trustclaw\.anon)/;
+const CONTAINS_TOKEN_RE = /(?:\[?CLAW_\[?[A-Z_]+_[A-F0-9]{4}\]?|CLAW_EMAIL_[A-F0-9]{4}@trustclaw\.anon)/;
 export function containsTokenPattern(text: string): boolean {
   return CONTAINS_TOKEN_RE.test(text);
 }
@@ -151,12 +151,19 @@ export class PIIVault {
     if (!text) return text;
 
     let result = text;
-    // Replace tokens with originals. Iterate all mappings to handle
-    // tokens that appear multiple times in the response.
     for (const mapping of this.mappings) {
-      // Use split/join instead of regex to avoid special char issues
+      // Match exact token (with brackets for non-email, domain format for email)
       while (result.includes(mapping.token)) {
         result = result.replace(mapping.token, mapping.original);
+      }
+      // Match unbracketed token — the LLM may strip brackets in prose
+      // (e.g., [CLAW_PERSON_NAME_542F] → CLAW_PERSON_NAME_542F in thought fields).
+      // Only applies to bracketed tokens; email tokens already have no brackets.
+      if (!mapping.token.startsWith("CLAW_EMAIL_")) {
+        const unbracketed = mapping.token.slice(1, -1); // strip [ and ]
+        while (result.includes(unbracketed)) {
+          result = result.replace(unbracketed, mapping.original);
+        }
       }
     }
 

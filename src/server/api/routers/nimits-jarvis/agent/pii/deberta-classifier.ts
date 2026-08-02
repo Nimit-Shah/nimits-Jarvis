@@ -103,12 +103,14 @@ async function getClassifier(): Promise<any> {
     const elapsed = Date.now() - lastFailureTime;
     if (elapsed < RETRY_COOLDOWN_MS) {
       if (!circuitLogged) {
-        console.warn(
-          `[DeBERTa] Circuit open (${consecutiveFailures} failures), skipping for ${Math.ceil((RETRY_COOLDOWN_MS - elapsed) / 1000)}s`,
+        console.error(
+          `[DeBERTa] ⛔ CIRCUIT OPEN — ${consecutiveFailures} consecutive failures. ` +
+            `PII Layer 3 (ML) is DOWN and will be skipped for the next ${Math.ceil((RETRY_COOLDOWN_MS - elapsed) / 1000)}s. ` +
+            `Falling back to regex+identity only. Check model connectivity/cache.`,
         );
         circuitLogged = true;
       }
-      return null;
+      throw new Error("DeBERTa classifier unavailable (circuit open)");
     }
     consecutiveFailures = 0;
     circuitLogged = false;
@@ -131,18 +133,22 @@ async function getClassifier(): Promise<any> {
       "Isotonic/deberta-v3-base_finetuned_ai4privacy_v2",
     );
 
-    console.log("[DeBERTa] Model loaded successfully");
+    // Reset the failure counter only when the model actually loaded
     consecutiveFailures = 0;
     circuitLogged = false;
+    console.log(`[DeBERTa] ✅ Model loaded successfully (after ${consecutiveFailures} recorded failure(s) this cycle)`);
     return classifierInstance;
   } catch (err) {
     consecutiveFailures++;
     lastFailureTime = Date.now();
-    console.warn(
-      `[DeBERTa] Failed to load model (attempt ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}).`,
+    console.error(
+      `[DeBERTa] ⛔ MODEL LOAD FAILED (attempt ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}). ` +
+        `PII Layer 3 (ML) is NOT running — falling back to regex+identity only.`,
       err,
     );
-    return null;
+    throw new Error(
+      `DeBERTa classifier failed to load after ${consecutiveFailures} attempt(s)`,
+    );
   }
 }
 
@@ -258,7 +264,6 @@ export async function classifyPII(
   if (isLikelyMachineString(text)) return [];
 
   const classifier = await getClassifier();
-  if (!classifier) return [];
 
   try {
     // Run WITHOUT aggregation_strategy to get raw BIO-tagged tokens with indices.

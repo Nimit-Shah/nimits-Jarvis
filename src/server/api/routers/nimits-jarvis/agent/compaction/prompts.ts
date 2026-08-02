@@ -119,7 +119,7 @@ export function serializeMessages(messages: ReconstructedMessage[]): string {
       for (const part of msg.content) {
         if (part.type === "text") {
           textParts.push(part.text);
-        } else {
+        } else if (part.type === "tool-call") {
           const args = formatToolArgs(part.input);
           toolCalls.push(`${part.toolName}(${args})`);
         }

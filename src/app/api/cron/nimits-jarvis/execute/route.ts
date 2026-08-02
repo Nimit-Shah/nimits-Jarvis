@@ -7,6 +7,7 @@ import { db } from "~/server/clients/db";
 import { prepareAgentRun } from "~/server/api/routers/nimits-jarvis/agent/setup";
 import { computeNextRunSafe } from "~/server/api/routers/nimits-jarvis/agent/tools/cron-utils";
 import { stripToolResultEchoes } from "~/server/api/routers/nimits-jarvis/agent/strip-tool-echoes";
+import { toHuman, toModel } from "~/server/api/routers/nimits-jarvis/agent/pii/brands";
 import { rateLimit } from "~/server/clients/rate-limit";
 import { sendTelegramMessage } from "~/server/clients/telegram";
 import { executeJobInput, cronJobRow, type CronJobRow } from "./route.schema";
@@ -123,7 +124,7 @@ async function executeJobs(
       userMessageType: "hidden",
     });
 
-    const { agent, messages } = prepareResult.result;
+    const { agent, messages, piiVault } = prepareResult.result;
 
     const result = await agent.generate({ prompt: messages });
 
@@ -132,7 +133,10 @@ async function executeJobs(
 
     // Forward to Telegram if linked
     if (telegramChatId) {
-      const cleanedText = stripToolResultEchoes(result.text);
+      const rawText = stripToolResultEchoes(result.text);
+      const cleanedText = piiVault
+        ? toHuman(piiVault, toModel(rawText))
+        : rawText;
       if (cleanedText) {
         const truncated =
           cleanedText.length > 4096

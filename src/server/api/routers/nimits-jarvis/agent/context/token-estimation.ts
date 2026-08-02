@@ -28,9 +28,11 @@ export function estimateMessageTokens(msg: ReconstructedMessage): number {
     for (const part of msg.content) {
       if (part.type === "text") {
         chars += part.text.length;
-      } else {
+      } else if (part.type === "tool-call") {
         chars += JSON.stringify(part.input).length;
         chars += part.toolName.length;
+      } else if (part.type === "reasoning") {
+        chars += part.text.length;
       }
     }
     return Math.ceil(chars / 4);

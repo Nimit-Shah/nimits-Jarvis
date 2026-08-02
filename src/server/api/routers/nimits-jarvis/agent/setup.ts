@@ -45,7 +45,11 @@ type MessageSource = "web" | "telegram" | "cron";
  * malformed Unicode that produces invalid JSON, and PII that should not
  * reach external LLMs.
  */
-function wrapToolExecutors(tools: ToolSet, vault: PIIVault | null): ToolSet {
+function wrapToolExecutors(
+  tools: ToolSet,
+  vault: PIIVault | null,
+  restoreCache: Map<string, unknown>,
+): ToolSet {
   const wrapped: ToolSet = {};
   for (const [name, tool] of Object.entries(tools)) {
     if (!tool.execute) {
@@ -60,8 +64,16 @@ function wrapToolExecutors(tools: ToolSet, vault: PIIVault | null): ToolSet {
           // to Composio. The LLM generated tool args may contain PII tokens
           // like [CLAW_EMAIL_A1B2] that need to be restored to real values.
           const [input] = args;
+          // The AI SDK passes a toolCallId inside the execution options (args[1]).
+          const options = args[1] as { toolCallId?: string } | undefined;
+          const tid = options?.toolCallId;
           // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
           const restoredInput = vault ? vault.restoreDeep(input) : input;
+          // Cache the restored (real) input ONCE so DB persistence + any UI
+          // re-render reads the exact same value the third-party tool saw.
+          if (vault && tid) {
+            restoreCache.set(tid, restoredInput);
+          }
 
           // Step 2: Call the actual tool with restored (real) values
           let result;
@@ -86,6 +98,12 @@ function wrapToolExecutors(tools: ToolSet, vault: PIIVault | null): ToolSet {
           // fields (names, emails in JSON) then redact all string values.
           if (vault) {
             vault.registerStructuredPII(sanitized);
+            // Cache the REAL (pre-redaction) result once, keyed by tool call id,
+            // so DB persistence reads the same value instead of re-restoring the
+            // redacted copy.
+            if (tid) {
+              restoreCache.set(`out:${tid}`, sanitized);
+            }
             // eslint-disable-next-line @typescript-eslint/no-unsafe-return
             return await vault.redactToolResult(sanitized);
           }
@@ -123,6 +141,11 @@ async function redactContextMessages(
               ...part,
               // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
               input: (await vault.redactToolResult(part.input)) as Record<string, unknown>,
+            });
+          } else if (part.type === "reasoning") {
+            redactedParts.push({
+              ...part,
+              text: await vault.redact(part.text as string),
             });
           } else {
             redactedParts.push(part);
@@ -299,12 +322,19 @@ export async function prepareAgentRun(
 
   const customTools = createCustomTools(instanceId, chatId, userTimezone);
 
+  // Per-request cache of restored (real) tool-call inputs/outputs, keyed by
+  // toolCallId (prefixed with "out:" for outputs). Ensures restoreDeep() is
+  // called at most once per tool call — Composio execution, DB persistence,
+  // and UI re-render all read the SAME cached value.
+  const restoreCache = new Map<string, unknown>();
+
   // Wrap tool executors with sanitization + optional PII redaction.
   // When a vault is active, tool results are scanned for PII and
   // sensitive values are replaced with tokens before the LLM sees them.
   const allTools: ToolSet = wrapToolExecutors(
     { ...composioTools, ...customTools },
     piiVault,
+    restoreCache,
   );
 
   // Pre-create assistant message row so we can update it in onFinish
@@ -390,13 +420,24 @@ export async function prepareAgentRun(
             const tr = step.toolResults[i];
             const rawInput = toPlainRecordSafe(tc.input);
             const rawOutput = tr ? toPlainRecordSafe(tr.output) : null;
+            const tid = tc.toolCallId;
 
+            // Use the CACHED restored value (set once by wrapToolExecutors during
+            // execution) so DB persistence stores the exact same value the tool saw,
+            // without a second restoreDeep() per tool call. Falls back to restoring
+            // now if the cache misses (e.g. tool executed outside the wrapper).
             const tcInput = piiVault
-              ? (piiVault.restoreDeep(rawInput) as Record<string, unknown>)
+              ? ((restoreCache.get(tid) ?? piiVault.restoreDeep(rawInput)) as Record<
+                  string,
+                  unknown
+                >)
               : rawInput;
             const tcResult = rawOutput
               ? piiVault
-                ? (piiVault.restoreDeep(rawOutput) as Record<string, unknown>)
+                ? ((restoreCache.get(`out:${tid}`) ?? piiVault.restoreDeep(rawOutput)) as Record<
+                    string,
+                    unknown
+                  >)
                 : rawOutput
               : null;
 
@@ -421,17 +462,19 @@ export async function prepareAgentRun(
           }
 
           // Persist reasoning/thinking for replay in the chain-of-thought UI.
-          // Uses the reasoning text as-is (it references the PII-tokenized input
-          // the model saw, not the real values).
+          // Restore PII tokens to real values so the human never sees tokens.
           const stepReasoning =
             step.reasoningText ??
             (step.reasoning?.length
               ? step.reasoning.map((r) => (r as { text?: string }).text ?? "").filter(Boolean).join("\n")
               : "");
           if (stepReasoning) {
+            const restoredReasoning = piiVault
+              ? piiVault.restore(stepReasoning)
+              : stepReasoning;
             assistantParts.push({
               type: "reasoning" as const,
-              text: stepReasoning,
+              text: restoredReasoning,
               state: "done" as const,
             });
           }

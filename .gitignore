@@ -83,3 +83,11 @@ identity.yaml
 
 # DeBERTa ONNX model cache
 .models_cache/
+
+# Graphify code knowledge graph & local agent rules
+graphify-out/
+.graphify*
+.graphifyignore
+.agents/
+AGENTS.md
+

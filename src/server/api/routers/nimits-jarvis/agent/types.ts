@@ -28,6 +28,7 @@ export type ReconstructedMessage =
                 toolName: string;
                 input: Record<string, unknown>;
               }
+            | { type: "reasoning"; text: string }
           >;
       providerOptions?: ProviderOptions;
     }

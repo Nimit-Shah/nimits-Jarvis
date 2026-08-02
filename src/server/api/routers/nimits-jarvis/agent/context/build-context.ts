@@ -221,6 +221,7 @@ export function reconstructMessages(
           toolName: string;
           input: Record<string, unknown>;
         }
+      | { type: "reasoning"; text: string }
     > = [];
     if (textContent) {
       assistantContent.push({ type: "text", text: textContent });
