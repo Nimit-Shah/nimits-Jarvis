@@ -237,19 +237,34 @@ export async function prepareAgentRun(
 
   const relevantMemories = await searchMemoriesForContext(instanceId, userMessage);
 
+  // Redact ONLY the dynamic user-supplied prompt sections (soul/identity/user),
+  // so static content (agent title, tool descriptions, protocol, guidelines)
+  // is passed through untouched — the agent name & product name must survive.
+  // If not PII-redacting (local model / disabled), sections pass through as-is.
+  const redactSection = async (section: string | null): Promise<string | null> =>
+    section === null || section.trim() === ""
+      ? section
+      : transportShield
+        ? await transportShield.scrubText(section)
+        : section;
+
+  const [safeSoul, safeIdentity, safeUser] = await Promise.all([
+    redactSection(instance.soulPrompt),
+    redactSection(instance.identityPrompt),
+    redactSection(instance.userPrompt),
+  ]);
+
   const systemPrompt = sanitizeString(
     buildSystemPrompt({
-      soulPrompt: instance.soulPrompt,
-      identityPrompt: instance.identityPrompt,
-      userPrompt: instance.userPrompt,
+      soulPrompt: safeSoul,
+      identityPrompt: safeIdentity,
+      userPrompt: safeUser,
       hasCompactionSummary: !!chat.lastCompactionSummary,
       isOllama,
       piiEnabled: !!piiVault,
       isVoice: isVoice ?? false,
     }),
-  );
-
-  const dbMessages = await loadContextMessages(
+  );  const dbMessages = await loadContextMessages(
     instanceId,
     chatId,
     chat.lastCompactionAt,
@@ -361,12 +376,11 @@ export async function prepareAgentRun(
       ? createOpenRouter({ apiKey: env.OPENROUTER_API_KEY })(resolveModelId(chat.model))
       : resolveModelId(chat.model);
 
-  // Final transport-layer scrub: the system prompt itself may contain
-  // PII from the user's identity/soul/user prompts. Scrub it before
-  // it's baked into the agent's instructions.
-  const safeSystemPrompt = transportShield
-    ? await transportShield.scrubText(systemPrompt)
-    : systemPrompt;
+  // NOTE: The system prompt's user-supplied sections (soul/identity/user) were
+  // already redacted above via redactSection(). Static sections (agent title,
+  // tool descriptions, protocol, guidelines) are intentionally NOT scrubbed so
+  // the agent name & product name are never tokenized.
+  const safeSystemPrompt = systemPrompt;
 
   const agent = new ToolLoopAgent({
     model,

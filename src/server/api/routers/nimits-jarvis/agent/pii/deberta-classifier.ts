@@ -26,6 +26,7 @@
 
 import type { PIIType } from "./pii-types";
 import { isTokenString } from "./pii-tokenizer";
+import { isProtectedTerm } from "./protected-terms";
 
 export interface ClassificationResult {
   value: string;
@@ -220,16 +221,35 @@ function reconstructSpan(words: string[]): string {
 }
 
 /**
- * Find the character position of `span` in `text` starting after `fromIndex`.
+ * Find the character position of `span` in `text` starting after `fromIndex`,
+ * requiring that the match is a WHOLE word (not a substring of a larger token).
+ *
+ * This prevents partial-span corruption where a reconstructed DeBERTa span like
+ * "Jarv" (a token-piece fragment of "Jarvis") would otherwise match inside
+ * "Jarvis" and be tokenized, leaving "...vis" behind →
+ * "[CLAW_PERSON_NAME_XXXX]vis".
  */
-function findSpanInText(
+function findWholeWordSpan(
   text: string,
   span: string,
   fromIndex = 0,
 ): { start: number; end: number } | null {
-  const idx = text.indexOf(span, fromIndex);
-  if (idx === -1) return null;
-  return { start: idx, end: idx + span.length };
+  let idx = fromIndex;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    idx = text.indexOf(span, idx);
+    if (idx === -1) return null;
+    const before = text.charAt(idx - 1);
+    const after = text.charAt(idx + span.length);
+    const wordBoundaryBefore =
+      idx === 0 || !/[a-zA-Z0-9_]/.test(before);
+    const wordBoundaryAfter = !/[a-zA-Z0-9_]/.test(after);
+    if (wordBoundaryBefore && wordBoundaryAfter) {
+      return { start: idx, end: idx + span.length };
+    }
+    // Not a whole word — keep searching after this occurrence
+    idx += 1;
+  }
 }
 
 /**
@@ -304,8 +324,11 @@ export async function classifyPII(
       // Skip already-tokenized values or machine identifiers (tool slugs, param names)
       if (isTokenString(spanValue) || isLikelyMachineString(spanValue)) continue;
 
-      // Locate the span in the original text to get character offsets
-      const pos = findSpanInText(text, spanValue, searchFrom);
+      // Skip protected terms (agent/product names, functional IDs) — never redact
+      if (isProtectedTerm(spanValue)) continue;
+
+      // Locate the span in the original text as a whole word to get offsets
+      const pos = findWholeWordSpan(text, spanValue, searchFrom);
       if (!pos) {
         // Fallback: emit without exact positions (still seeds the vault)
         results.push({ value: spanValue, category: piiType, start: 0, end: 0, score: group.score });

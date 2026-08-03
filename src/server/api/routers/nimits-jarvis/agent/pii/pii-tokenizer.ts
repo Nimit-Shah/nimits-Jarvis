@@ -13,6 +13,7 @@
 import { createHash } from "crypto";
 import type { PIIMatch, PIIMapping, PIIType, PIIVaultStats } from "./pii-types";
 import { scanForPII, scanForPIIEnhanced, extractStructuredPII } from "./pii-scanner";
+import { isProtectedTerm } from "./protected-terms";
 
 /** Token format: email gets domain format, others get bracket format */
 function makeToken(type: PIIType, index: number): string {
@@ -65,6 +66,10 @@ export class PIIVault {
   registerPII(type: PIIType, value: string): string {
     const canonical = canonicalizeForLookup(value);
     if (!canonical) return value;
+
+    // NEVER tokenize protected terms (agent name, product name, functional
+    // IDs). Returning the value unchanged means redaction is a no-op for it.
+    if (isProtectedTerm(value)) return value;
 
     // Dedup: reuse existing token for the same canonical value
     const existing = this.forwardMap.get(canonical);
@@ -156,10 +161,24 @@ export class PIIVault {
       while (result.includes(mapping.token)) {
         result = result.replace(mapping.token, mapping.original);
       }
-      // Match unbracketed token — the LLM may strip brackets in prose
-      // (e.g., [CLAW_PERSON_NAME_542F] → CLAW_PERSON_NAME_542F in thought fields).
-      // Only applies to bracketed tokens; email tokens already have no brackets.
-      if (!mapping.token.startsWith("CLAW_EMAIL_")) {
+      if (mapping.token.startsWith("CLAW_EMAIL_")) {
+        // Email tokens are domain-format with NO brackets on the local part.
+        // The LLM sometimes wraps the local part in brackets anyway (following the
+        // "tokens are wrapped in []" instruction in the system prompt), producing
+        // "[CLAW_EMAIL_FE1A]@trustclaw.anon". Tolerate an optional surrounding
+        // bracket so such text still resolves back to the real email.
+        const at = mapping.token.indexOf("@");
+        const local = mapping.token.slice(0, at);
+        const domain = mapping.token.slice(at);
+        const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(
+          `\\[?\\s*${esc(local)}\\s*\\]?\\${esc(domain)}`,
+          "g",
+        );
+        result = result.replace(re, mapping.original);
+      } else {
+        // Match unbracketed token — the LLM may strip brackets in prose
+        // (e.g., [CLAW_PERSON_NAME_542F] → CLAW_PERSON_NAME_542F in thought fields).
         const unbracketed = mapping.token.slice(1, -1); // strip [ and ]
         while (result.includes(unbracketed)) {
           result = result.replace(unbracketed, mapping.original);
@@ -321,7 +340,19 @@ const SYSTEM_METADATA_KEYS = new Set([
   "description",
   "type",
   "format",
-  "arguments",
+  // Composio tool-router schema guidance (trusted machine-generated boilerplate,
+  // not user data). Skipped so DeBERTa/regex don't inject tokens into guidance
+  // text the LLM should read verbatim.
+  "known_pitfalls",
+  "knownpitfalls",
+  "execution_guidance",
+  "recommended_plan_steps",
+  "next_steps_guidance",
+  "usecase",
+  "use_case",
+  "related_tool_slugs",
+  "primary_tool_slugs",
+  "toolkits",
   // Geographic / API response translation dicts & metadata
   "local_names",
   "localnames",

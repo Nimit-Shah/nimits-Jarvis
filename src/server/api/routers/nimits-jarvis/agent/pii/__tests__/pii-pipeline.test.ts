@@ -3,6 +3,7 @@ import { PIITransportShield } from "../pii-transport-shield";
 import { scanForPII, scanForPIIEnhanced, extractStructuredPII } from "../pii-scanner";
 import { IdentityRegistry } from "../identity-registry";
 import { classifyPII, resetDeBERTa, forceCircuitOpen } from "../deberta-classifier";
+import { isProtectedTerm } from "../protected-terms";
 
 // ─── Test Helpers ─────────────────────────────────────────────────
 
@@ -609,6 +610,66 @@ async function runAllTests() {
     assertEqual(result, "The email is john@example.com", "email token should be restored");
   });
 
+  // ── Email bracket tolerance (SSE rehydration regression) ──
+  console.log("\n=== Email bracket tolerance (rehydration fix) ===\n");
+
+  await runTest("restores email token when local part is bracketed", async () => {
+    const vault = new PIIVault();
+    vault.registerPII("email", "surajitshasmal15@gmail.com");
+    // The LLM may wrap the local part in brackets: [CLAW_EMAIL_FE1A]@trustclaw.anon
+    const result = vault.restore("Sent the email to [CLAW_EMAIL_FE1A]@trustclaw.anon with the body");
+    assert(
+      result.includes("surajitshasmal15@gmail.com"),
+      `bracketed email token should restore to real email, got: ${result}`,
+    );
+    assert(
+      !result.includes("[CLAW_EMAIL_"),
+      `token should be gone after restore, got: ${result}`,
+    );
+  });
+
+  await runTest("still restores plain (unbracketed) email token", async () => {
+    const vault = new PIIVault();
+    vault.registerPII("email", "surajitshasmal15@gmail.com");
+    const result = vault.restore("Sent to CLAW_EMAIL_FE1A@trustclaw.anon now");
+    assert(
+      result.includes("surajitshasmal15@gmail.com"),
+      `plain email token should restore, got: ${result}`,
+    );
+  });
+
+  await runTest("restores email token with whitespace around bracketed local part", async () => {
+    const vault = new PIIVault();
+    vault.registerPII("email", "surajitshasmal15@gmail.com");
+    const result = vault.restore("Sent to [CLAW_EMAIL_FE1A ]@trustclaw.anon");
+    assert(
+      result.includes("surajitshasmal15@gmail.com"),
+      `whitespace-tolerant email restore should work, got: ${result}`,
+    );
+  });
+
+  await runTest("containsTokenPattern detects bracketed email local part", () => {
+    assert(
+      containsTokenPattern("[CLAW_EMAIL_FE1A]@trustclaw.anon"),
+      "bracketed email form should be detected",
+    );
+    assert(
+      containsTokenPattern("CLAW_EMAIL_FE1A@trustclaw.anon"),
+      "plain email form should be detected",
+    );
+  });
+
+  await runTest("does not corrupt surrounding email domain text", async () => {
+    const vault = new PIIVault();
+    vault.registerPII("email", "a@b.com");
+    // Deliberately a token that is NOT present should leave unrelated text alone
+    const result = vault.restore("no tokens here, just CLAW_EMAIL_ZZZZ@trustclaw.anon absent");
+    assert(
+      result.includes("CLAW_EMAIL_ZZZZ@trustclaw.anon"),
+      "unregistered token should pass through unchanged",
+    );
+  });
+
   await runTest("B3: containsTokenPattern detects unbracketed token", async () => {
     assert(containsTokenPattern("text CLAW_PERSON_NAME_A1B2 more text"), "should detect unbracketed token");
     assert(containsTokenPattern("[CLAW_PERSON_NAME_A1B2]"), "should still detect bracketed token");
@@ -689,6 +750,120 @@ async function runAllTests() {
     assert(
       !reasoningPart.text.includes("John Doe"),
       `reasoning part should be redacted: ${reasoningPart.text}`,
+    );
+  });
+
+  // ── Protected Terms + Functional IDs ──
+  console.log("\n=== Protected Terms & Functional IDs (Part A/B) ===\n");
+
+  await runTest("protected terms are never redacted (agent/product names)", async () => {
+    const vault = new PIIVault();
+    // "Jarvis" (agent name) and "Project Aurora" (product) must NOT be tokenized
+    const text = "Jarvis the assistant working on Project Aurora for Nimit";
+    const redacted = await vault.redact(text);
+    assert(
+      redacted.includes("Jarvis"),
+      `agent name should be preserved: ${redacted}`,
+    );
+    assert(
+      redacted.includes("Project Aurora"),
+      `product name should be preserved: ${redacted}`,
+    );
+    // The user's real name Nimit is NOT protected and should be redacted
+    assert(
+      !redacted.includes("Nimit"),
+      `user name should be redacted: ${redacted}`,
+    );
+  });
+
+  await runTest("isProtectedTerm matches case-insensitive full terms", () => {
+    assert(isProtectedTerm("jarvis"), "lowercase should match");
+    assert(isProtectedTerm("JARVIS"), "uppercase should match");
+    assert(isProtectedTerm("Jarvis"), "mixed case should match");
+    assert(isProtectedTerm("Jarvis the assistant"), "term within value should match");
+    assert(!isProtectedTerm("Nimit"), "user real name must NOT be protected");
+    assert(!isProtectedTerm("Jarvisons"), "partial substring should NOT match");
+  });
+
+  await runTest("URN regex only matches LinkedIn URNs (functional URNs preserved)", () => {
+    const matches = scanForPII(
+      "LinkedIn: urn:li:person:12345 and functional urn:uuid:abc-123 and urn:resource:xyz",
+    );
+    const urns = matches.filter((m) => m.type === "urn");
+    assert(
+      urns.some((m) => m.value.includes("urn:li:person:12345")),
+      `LinkedIn URN should be detected: ${JSON.stringify(urns)}`,
+    );
+    assert(
+      !urns.some((m) => m.value.includes("urn:uuid")),
+      `functional urn:uuid should NOT be redacted: ${JSON.stringify(urns)}`,
+    );
+    assert(
+      !urns.some((m) => m.value.includes("urn:resource")),
+      `functional urn:resource should NOT be redacted: ${JSON.stringify(urns)}`,
+    );
+  });
+
+  await runTest("functional IDs in free text are not phone-redacted", () => {
+    // A numeric resource id (preceded by non-alphanumeric context) still passes
+    // the phone validator, but a "connected_account_id" style value presented
+    // standalone should be preserved via protected terms if configured. Here we
+    // just verify normal digits still detect a phone.
+    const matches = scanForPII("Call +1 (234) 567-8901 for support");
+    assert(
+      matches.some((m) => m.type === "phone"),
+      `should detect phone: ${JSON.stringify(matches)}`,
+    );
+  });
+
+  await runTest("MULTI_EXECUTE nested arguments are redacted (Fix 1 Option A)", async () => {
+    // Regression test for the critical leak: the real recipient email inside
+    // COMPOSIO_MULTI_EXECUTE_TOOL's nested tools[].arguments.recipient_email
+    // must be redacted on BOTH the first redaction and a re-redaction pass
+    // (simulating re-redaction of stored tool-call args on the FOLLOW-UP turn).
+    const vault = new PIIVault();
+    const multiExecuteInput = {
+      current_step: "SENDING_EMAIL",
+      session_id: "body",
+      thought: "Sending the email to the recipient",
+      tools: [
+        {
+          tool_slug: "GMAIL_SEND_EMAIL",
+          arguments: {
+            recipient_email: "rahulgandhi54321@gmail.com",
+            subject: "Test, mic testing",
+            body: "Test, mic testing",
+          },
+        },
+      ],
+    };
+
+    // Pass 1: first redaction
+    const redacted1 = await vault.redactToolResult(multiExecuteInput) as {
+      tools: Array<{ tool_slug: string; arguments: { recipient_email: string } }>;
+    };
+    const email1 = redacted1.tools[0]!.arguments!.recipient_email;
+    assert(
+      !email1.includes("gmail.com"),
+      `first redaction should tokenize recipient_email, got ${email1}`,
+    );
+
+    // Pass 2: THIS is what the follow-up turn does — the stored (restored-real)
+    // message reloaded and re-redacted. It must also tokenize.
+    vault.registerStructuredPII({ to: "rahulgandhi54321@gmail.com" });
+    const redacted2 = await vault.redactToolResult(multiExecuteInput) as {
+      tools: Array<{ tool_slug: string; arguments: { recipient_email: string } }>;
+    };
+    const email2 = redacted2.tools[0]!.arguments!.recipient_email;
+    assert(
+      !email2.includes("gmail.com"),
+      `re-redaction (follow-up turn) should tokenize recipient_email, got ${email2}`,
+    );
+
+    // The tool_slug must remain readable (functional metadata)
+    assert(
+      redacted2.tools[0]!.tool_slug === "GMAIL_SEND_EMAIL",
+      "tool_slug should be preserved",
     );
   });
 

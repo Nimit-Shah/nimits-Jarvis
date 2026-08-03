@@ -15,6 +15,7 @@
 import type { PIIMatch, PIIType } from "./pii-types";
 import { IdentityRegistry } from "./identity-registry";
 import { classifyPII } from "./deberta-classifier";
+import { isProtectedTerm } from "./protected-terms";
 
 // ─── Regex Patterns ────────────────────────────────────────────────
 
@@ -60,9 +61,14 @@ const IPV4_RE =
 const API_KEY_RE =
   /\b(?:sk-[a-zA-Z0-9]{20,}|pk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36,}|gho_[a-zA-Z0-9]{36,}|ghs_[a-zA-Z0-9]{36,}|ghr_[a-zA-Z0-9]{36,}|xox[bpa]-[a-zA-Z0-9\-]{20,}|sk-ant-[a-zA-Z0-9\-]{20,}|AIza[a-zA-Z0-9\-_]{35})\b/g;
 
-/** URNs (Uniform Resource Names), commonly used for LinkedIn IDs (urn:li:person:12345) and other internal identifiers */
+/**
+ * LinkedIn URNs (Uniform Resource Names) — personally identifiable identifiers
+ * (e.g. urn:li:person:12345). Scoped to ONLY LinkedIn URNs so arbitrary
+ * functional URNs (urn:uuid:..., urn:resource:...) used in tool calls are
+ * never redacted and don't break functionality.
+ */
 const URN_RE =
-  /\burn:[a-zA-Z0-9\-]+:[a-zA-Z0-9\-:]+\b/gi;
+  /\burn:li:(?:person|company|school|group):[a-zA-Z0-9\-:]+\b/gi;
 
 /** LinkedIn Profile URLs */
 const LINKEDIN_URL_RE =
@@ -156,6 +162,10 @@ export function scanForPII(text: string): PIIMatch[] {
       if (pattern.validate && !pattern.validate(value, text, match.index)) {
         continue;
       }
+
+      // NEVER redact protected terms (agent/product names, functional IDs) —
+      // tokenizing them breaks functionality or corrupts the surrounding prompt.
+      if (isProtectedTerm(value)) continue;
 
       allMatches.push({
         type: pattern.type,
