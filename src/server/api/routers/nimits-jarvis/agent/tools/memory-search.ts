@@ -157,3 +157,25 @@ export async function searchMemoriesForContext(
     return [];
   }
 }
+
+/**
+ * Cheap, free heuristic to decide if the prep-time memory lookup is worth
+ * running at all. Most conversational follow-ups don't reference past context,
+ * so we skip the (network) Mnemosyne/embedding call entirely unless the prompt
+ * contains an explicit backward reference or a distinctive entity/topic token.
+ *
+ * This is intentionally conservative: when it says "skip", we simply don't
+ * pre-load memories — the agent can still call the `memory_search` tool itself
+ * if a follow-up needs it. When it says "lookup", we fall through to the real
+ * semantic search. The helper only gates the *prep-time* call, never the tool.
+ */
+const BACKWARD_REFERENCE_RE =
+  /(?:\b(?:earlier|before|later|previously|remember|recall|last time|we discussed|we said|we decided|the other day|yesterday|that thing|what about)\b|(?:do you (?:still |)remember|you said|i mentioned|as we discussed))/i;
+
+export function shouldLookupMemoriesForContext(prompt: string): boolean {
+  if (!prompt || prompt.trim().length < 2) return false;
+  // Explicit backward reference ("earlier", "we discussed", "last time", ...).
+  // Conservative by design: default is to SKIP the prep-time lookup (the latency
+  // win); the agent can still call the `memory_search` tool when needed.
+  return BACKWARD_REFERENCE_RE.test(prompt);
+}

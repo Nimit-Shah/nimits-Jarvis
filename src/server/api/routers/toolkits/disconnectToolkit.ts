@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { protectedProcedure } from "~/server/api/trpc";
-import { createComposioClientForInstance } from "~/server/clients/composio";
+import { createComposioClientForInstance, invalidateSession } from "~/server/clients/composio";
 import { decrypt } from "~/lib/crypto";
 import { getInstanceForUser } from "~/server/api/routers/nimits-jarvis/utils";
 
@@ -55,6 +55,10 @@ export const disconnectToolkit = protectedProcedure
     }
 
     await composio.connectedAccounts.delete(input.connectionId);
+
+    // Invalidate the agent's cached session+tools so the next turn rebuilds
+    // without the now-disconnected toolkit.
+    invalidateSession(instance.id);
 
     return { success: true };
   });

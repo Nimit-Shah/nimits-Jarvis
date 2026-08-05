@@ -2,13 +2,14 @@ import { ToolLoopAgent, stepCountIs } from "ai";
 import type { ToolSet, SystemModelMessage } from "ai";
 import { after } from "next/server";
 import { db } from "~/server/clients/db";
-import { createComposioClient, createComposioClientForInstance } from "~/server/clients/composio";
+import { getOrCreateSessionAndTools } from "~/server/clients/composio";
 import { decrypt } from "~/lib/crypto";
 import { buildSystemPrompt } from "./system-prompt";
 import { ollamaProvider } from "~/server/clients/ollama";
 import {
   createCustomTools,
   searchMemoriesForContext,
+  shouldLookupMemoriesForContext,
 } from "./tools";
 import { getContextWindow } from "./context/context-window";
 import { pruneContext } from "./context/context-pruning";
@@ -194,6 +195,10 @@ export async function prepareAgentRun(
   params: PrepareAgentRunParams,
 ): Promise<PrepareResult> {
   const { instanceId, chatId, userMessage, source, userMessageType, isVoice } = params;
+  const t0 = performance.now();
+  const mark = (label: string) => {
+    console.log(`[agent/prep] ${label}: ${Math.round(performance.now() - t0)}ms`);
+  };
 
   const [instance, chat] = await Promise.all([
     db.composioClawInstance.findUnique({
@@ -217,6 +222,7 @@ export async function prepareAgentRun(
   });
 
   const userTimezone = user?.timezone ?? "UTC";
+  mark("db: instance+chat+user");
 
   const provider = getModelProvider(chat.model);
   const isOllama = provider === "ollama";
@@ -233,7 +239,14 @@ export async function prepareAgentRun(
   // (tool results, context messages, system prompt, user message).
   const transportShield = piiVault ? new PIITransportShield(piiVault) : null;
 
-  const relevantMemories = await searchMemoriesForContext(instanceId, userMessage);
+  // Only run the (network) prep-time memory lookup when it's plausibly needed.
+  // Conservative heuristic: skip for in-flow follow-ups (the agent can still
+  // call memory_search itself), which removes a blocking call from the common
+  // case and speeds up time-to-first-token.
+  const relevantMemories = shouldLookupMemoriesForContext(userMessage)
+    ? await searchMemoriesForContext(instanceId, userMessage)
+    : [];
+  mark("memory search");
 
   // Redact ONLY the dynamic user-supplied prompt sections (soul/identity/user),
   // so static content (agent title, tool descriptions, protocol, guidelines)
@@ -311,13 +324,17 @@ export async function prepareAgentRun(
       );
     }
   })();
-  const composio = createComposioClientForInstance(decryptedApiKey);
-  const session = await composio.create(instance.id, {
-    manageConnections: {
-      waitForConnections: true,
-    },
-  });
-  const rawComposioTools = await session.tools();
+  // Reuse a cached Composio tool-router session + tool list across turns for
+  // this instance. This avoids re-invoking composio.create() + session.tools()
+  // (2 network calls) on conversational follow-ups — the biggest pre-first-token
+  // latency cost. Connection-status/connect flows keep fresh sessions and call
+  // invalidateSession() to refresh this cache.
+  const { rawTools: rawComposioTools } = await getOrCreateSessionAndTools(
+    instance.id,
+    decryptedApiKey,
+    { manageConnections: { waitForConnections: true } },
+  );
+  mark("composio session+tools");
 
   await db.message.create({
     data: {
@@ -364,6 +381,7 @@ export async function prepareAgentRun(
       cacheWriteTokens: 0,
     },
   });
+  mark("message rows");
 
   const model = isOllama
     // Ollama needs provider-specific options (keep-alive, context size).
@@ -569,6 +587,7 @@ export async function prepareAgentRun(
       redactedMessages as any,
     )) as typeof redactedMessages;
   }
+  mark("setup complete (pre-first-token)");
 
   return {
     status: "ready",

@@ -1,7 +1,7 @@
 import { createMemorySaveTool } from "./memory-save";
 import { createMemorySearchTool } from "./memory-search";
 import { createScheduleTool } from "./schedule";
-export { searchMemoriesForContext } from "./memory-search";
+export { searchMemoriesForContext, shouldLookupMemoriesForContext } from "./memory-search";
 
 export function createCustomTools(instanceId: string, chatId?: string, userTimezone = "UTC") {
   return {

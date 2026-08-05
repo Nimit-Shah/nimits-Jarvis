@@ -1,6 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { protectedProcedure } from "~/server/api/trpc";
-import { createComposioClientForInstance } from "~/server/clients/composio";
+import { createComposioClientForInstance, invalidateSession } from "~/server/clients/composio";
 import { decrypt } from "~/lib/crypto";
 import { getInstanceForUser } from "~/server/api/routers/nimits-jarvis/utils";
 import { env } from "~/env";
@@ -28,6 +28,11 @@ const composio = createComposioClientForInstance(decryptedApiKey);
         callbackUrl: `${env.NEXT_PUBLIC_APP_URL}/dashboard/toolkits`,
       });
       const redirectUrl = connectionRequest.redirectUrl;
+
+      // A connection is being initiated/added — invalidate the agent's cached
+      // session+tools so the next turn reflects the new connection once OAuth
+      // completes (WAIT_FOR_CONNECTIONS handles the post-completion handshake).
+      invalidateSession(instance.id);
 
       if (!redirectUrl) {
         throw new TRPCError({

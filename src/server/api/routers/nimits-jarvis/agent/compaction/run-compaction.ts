@@ -35,7 +35,11 @@ interface CompactionResult {
 }
 
 const ADAPTIVE_CHUNK_THRESHOLD = 100_000;
-const LARGE_TOOL_RESULT_THRESHOLD = 10_000;
+// Aggressively strip verbose tool results before summarization. Composio web /
+// remote results can be enormous (multi-KB of HTML/JSON), which blows past the
+// summarizer's safe budget and causes the LLM call to fail (timeout or
+// context-too-large). Lower threshold => more stripping => higher success odds.
+const LARGE_TOOL_RESULT_THRESHOLD = 2_000;
 const MAX_COMPACTION_ATTEMPTS = 3;
 
 export function findCutPoint(
@@ -80,10 +84,15 @@ async function summarize(
   // Local Ollama models are exempt since data stays on-device.
   const vault = getModelProvider(anthropicModel) !== "ollama" ? new PIIVault() : null;
 
+  // Cap the serialized conversation to this model's safe budget BEFORE redaction
+  // and the LLM call. This is the model-agnostic guaranteed guard so neither the
+  // primary call, staged halves, nor the stripped-retry ever send an oversized
+  // prompt (a common cause of timeout / context-too-large summarizer failure).
   const safeConversation = sanitizeString(conversationText);
+  const cappedConversation = capConversationText(safeConversation, anthropicModel);
   const safePreviousSummary = previousSummary ? sanitizeString(previousSummary) : null;
 
-  const redactedConversation = vault ? await vault.redact(safeConversation) : safeConversation;
+  const redactedConversation = vault ? await vault.redact(cappedConversation) : cappedConversation;
   const redactedPreviousSummary = vault && safePreviousSummary
     ? await vault.redact(safePreviousSummary)
     : safePreviousSummary;
@@ -184,6 +193,44 @@ function stripLargeToolResults(
 }
 
 /**
+ * Cap a serialized conversation string to the model's safe summarization budget,
+ * preserving the MOST RECENT content (truncate from the front). Generalizes
+ * across all providers via computeSummarizationBudget(). Returns the original
+ * string unchanged if it's already within budget.
+ */
+function capConversationText(text: string, modelId: string): string {
+  const budget = computeSummarizationBudget(modelId);
+  if (text.length <= budget) return text;
+  return `... [earlier context omitted] ...\n${text.slice(-budget)}`;
+}
+
+/**
+ * Log a summarization failure with a human-readable reason so compaction
+ * failures are diagnosable (timeout vs context-too-large vs provider error).
+ */
+function describeCompactionFailure(label: string, error: unknown): void {
+  const err = error as { name?: string; message?: string; cause?: unknown };
+  const name = err?.name ?? "UnknownError";
+  const msg = err?.message ?? String(error ?? "unknown");
+  let reason = "unknown";
+  const lower = `${name} ${msg}`.toLowerCase();
+  if (lower.includes("abort") || lower.includes("timeout") || lower.includes("socket hang up")) {
+    reason = "timeout/aborted";
+  } else if (
+    lower.includes("context") ||
+    lower.includes("too large") ||
+    lower.includes("token") ||
+    lower.includes("maximum") ||
+    lower.includes("prompt is long")
+  ) {
+    reason = "context-too-large";
+  } else if (lower.includes("rate") || lower.includes("429")) {
+    reason = "rate-limit";
+  }
+  console.warn(`${label} — reason=${reason} (${name}: ${msg.slice(0, 300)})`);
+}
+
+/**
  * Last-resort fallback when LLM summarization fails: keep the last `n`
  * user/assistant TEXT messages verbatim so the human's intent is never lost.
  * Returns the string to use as the summary, or null if there is no text content.
@@ -265,14 +312,12 @@ export async function runCompaction(
       );
     }
   } catch (error) {
-    console.warn("[compaction] summarize failed, retrying without large tool results:", error);
+    describeCompactionFailure("[compaction] summarize failed, retrying without large tool results", error);
     llmFailed = true;
     try {
       const stripped = stripLargeToolResults(messagesToCompact);
       const strippedText = serializeMessages(stripped);
-      const cappedStripped = strippedText.length > budget
-        ? `... [earlier context omitted] ...\n${strippedText.slice(-budget)}`
-        : strippedText;
+      const cappedStripped = capConversationText(strippedText, anthropicModel);
       summary = await summarize(
         anthropicModel,
         cappedStripped,
@@ -280,14 +325,25 @@ export async function runCompaction(
       );
       llmFailed = false;
     } catch (innerError) {
-      console.warn("[compaction] stripped summarize also failed:", innerError);
-      // Better last-resort: preserve the most recent human intent verbatim.
+      describeCompactionFailure("[compaction] stripped summarize also failed", innerError);
+      // Better last-resort: preserve the most recent human intent verbatim
+      // (compacted slice only — keepLastTextFallback semantics are unchanged).
       const fallback = keepLastTextFallback(messagesToCompact, 5);
-      summary = fallback
-        ? `Conversation compaction summary unavailable. Most recent messages preserved verbatim:\n\n${fallback}`
-        : `Conversation covered ${messagesToCompact.length} messages. Summary unavailable due to context limits.`;
+      if (fallback) {
+        summary =
+          `Conversation compaction summary unavailable. Most recent messages preserved verbatim:\n\n${fallback}`;
+      } else if (previousSummary) {
+        // Avoid overwriting a known-good prior summary with a worse placeholder.
+        summary = previousSummary;
+        console.warn(
+          "[compaction] fallback: preserving previous summary (no recent text to keep, summarization failed)",
+        );
+      } else {
+        summary = `Conversation covered ${messagesToCompact.length} messages. Summary unavailable due to context limits.`;
+      }
     }
   }
+
 
   const failuresSuffix = buildToolFailuresSuffix(messagesToCompact);
   if (failuresSuffix) {

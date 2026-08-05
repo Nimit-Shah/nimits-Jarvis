@@ -1,6 +1,7 @@
 import { llmTimeoutFor } from "../model-utils";
 import { computeSummarizationBudget } from "../context/context-window";
 import { keepLastTextFallback } from "../compaction/run-compaction";
+import { shouldLookupMemoriesForContext } from "../tools/memory-search";
 import type { ReconstructedMessage } from "../types";
 
 let passed = 0;
@@ -78,6 +79,33 @@ async function runAllTests() {
     ];
     const fallback = keepLastTextFallback(messages, 5);
     assert(fallback === null, "should return null when no user/assistant text");
+  });
+
+  await runTest("shouldLookupMemoriesForContext triggers on backward reference", () => {
+    const triggers = [
+      "what did we discuss earlier about the PII vault",
+      "do you remember my email preference",
+      "that thing from last time",
+      "you said we should use postgres",
+      "as we discussed about the api",
+      "can you remind me what we decided",
+    ];
+    for (const t of triggers) {
+      assert(shouldLookupMemoriesForContext(t), `should lookup for: ${t}`);
+    }
+  });
+
+  await runTest("shouldLookupMemoriesForContext skips in-flow followups", () => {
+    const skips = [
+      "send me the link to big basket",
+      "thanks that was helpful",
+      "ok sounds good",
+      "",
+      "  ",
+    ];
+    for (const s of skips) {
+      assert(!shouldLookupMemoriesForContext(s), `should skip for: "${s}"`);
+    }
   });
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);
