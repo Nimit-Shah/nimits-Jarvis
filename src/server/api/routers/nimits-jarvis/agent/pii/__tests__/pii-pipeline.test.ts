@@ -816,6 +816,27 @@ async function runAllTests() {
     );
   });
 
+  await runTest("hex plan_id is not phone-tokenized (partial ID false positive)", () => {
+    // Regression: a long hex ID like a plan_id must NOT have a digit-run flagged
+    // as a phone (which previously produced "[CLAW_PHONE_EDEC]e41d29fc...".
+    const text = '"plan_id":"63869336581e41d29fc4506b340027dc"';
+    const matches = scanForPII(text);
+    const phones = matches.filter((m) => m.type === "phone");
+    assert(
+      phones.length === 0,
+      `hex plan_id should NOT be phone-matched: ${JSON.stringify(phones)}`,
+    );
+  });
+
+  await runTest("phone numbers are still detected when bounded by text", () => {
+    const matches = scanForPII("Call 234-567-8901, then email me");
+    const phones = matches.filter((m) => m.type === "phone");
+    assert(
+      phones.length >= 1,
+      `bounded phone should be detected: ${JSON.stringify(matches)}`,
+    );
+  });
+
   await runTest("MULTI_EXECUTE nested arguments are redacted (Fix 1 Option A)", async () => {
     // Regression test for the critical leak: the real recipient email inside
     // COMPOSIO_MULTI_EXECUTE_TOOL's nested tools[].arguments.recipient_email

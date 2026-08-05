@@ -6,8 +6,6 @@ import { createComposioClient, createComposioClientForInstance } from "~/server/
 import { decrypt } from "~/lib/crypto";
 import { buildSystemPrompt } from "./system-prompt";
 import { ollamaProvider } from "~/server/clients/ollama";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { env } from "~/env";
 import {
   createCustomTools,
   searchMemoriesForContext,
@@ -30,7 +28,7 @@ import {
 import { stripToolResultEchoes } from "./strip-tool-echoes";
 import { clearStreamingMessage } from "~/server/clients/redis";
 import type { ReconstructedMessage } from "./types";
-import { getModelProvider, isAnthropicModel, resolveModelId } from "./model-utils";
+import { getModelProvider, isAnthropicModel, buildLLM } from "./model-utils";
 import { optimizeToolSchemas } from "./tool-optimizer";
 import { PIIVault, PIITransportShield } from "./pii";
 
@@ -368,13 +366,14 @@ export async function prepareAgentRun(
   });
 
   const model = isOllama
+    // Ollama needs provider-specific options (keep-alive, context size).
     ? ollamaProvider(chat.model, {
         keep_alive: -1,
         options: { num_ctx: getContextWindow(chat.model) },
       })
-    : provider === "openrouter"
-      ? createOpenRouter({ apiKey: env.OPENROUTER_API_KEY })(resolveModelId(chat.model))
-      : resolveModelId(chat.model);
+    // All other providers (OpenRouter-routed DeepSeek/Gemini/GPT/Llama, bare
+    // Anthropic) are built by the shared provider-agnostic helper.
+    : buildLLM(chat.model);
 
   // NOTE: The system prompt's user-supplied sections (soul/identity/user) were
   // already redacted above via redactSection(). Static sections (agent title,

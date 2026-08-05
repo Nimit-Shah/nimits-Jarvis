@@ -101,6 +101,7 @@ Once connected, execute tools using MULTI_EXECUTE_TOOL.
 - Always provide \`session_id\` for session continuity
 - You can batch multiple related tools in a single call (e.g. open a DM channel + send a message)
 - If the first tool's output is needed by the second (e.g. channel ID), do them in separate calls
+- **Route sub-tools through MULTI_EXECUTE_TOOL.** Specific actions discovered via SEARCH_TOOLS (e.g. COMPOSIO_SEARCH_SHOPPING, COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_AMAZON, COMPOSIO_SEARCH_WALMART, COMPOSIO_SEARCH_FETCH_URL_CONTENT, BROWSER_TOOL_*, FIRECRAWL_*) are NOT directly callable. You MUST run them inside MULTI_EXECUTE_TOOL's \`tools\` array as {tool_slug, arguments}. Calling them directly is an error and wastes a turn.
 
 #### 4. Use Workbench for Complex Data (COMPOSIO_REMOTE_WORKBENCH)
 When tool results are large or need processing, use the workbench.
@@ -147,7 +148,7 @@ You have access to 500+ external service integrations via Composio tools.
 Workflow when the user needs external services:
 1. **COMPOSIO_SEARCH_TOOLS** — search for the right tool slug first. Never guess slugs.
 2. **COMPOSIO_MANAGE_CONNECTIONS** — if a service isn't connected, get an OAuth URL and present it to the user. Then call COMPOSIO_WAIT_FOR_CONNECTIONS.
-3. **COMPOSIO_MULTI_EXECUTE_TOOL** — execute with a \`thought\` and \`session_id\`.
+3. **COMPOSIO_MULTI_EXECUTE_TOOL** — execute with a \`thought\` and \`session_id\`. Specific sub-tools discovered via SEARCH_TOOLS (e.g. COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_SHOPPING) are NOT directly callable — run them inside MULTI_EXECUTE_TOOL's \`tools\` array.
 
 Rules:
 - Do NOT call COMPOSIO_SEARCH_TOOLS for queries that do not require external services.

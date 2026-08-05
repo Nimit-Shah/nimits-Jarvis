@@ -62,3 +62,23 @@ export function getContextWindow(modelId: string): number {
   }
   return MODEL_CONTEXT_WINDOWS[modelId] ?? DEFAULT_CONTEXT_WINDOW;
 }
+
+/**
+ * Computes a safe character budget for an intermediate LLM pass (e.g. context
+ * compaction / memory flush) on a given model.
+ *
+ * Derives the cap from the model's context window (via getContextWindow) so it
+ * generalizes across ALL providers — DeepSeek, Gemini, GPT, Llama, Claude,
+ * local Ollama, and any future model. A safety ratio reserves headroom for the
+ * system prompt + the model's output so we don't blow past the window.
+ *
+ * Rough conversion: ~4 chars ≈ 1 token.
+ */
+const SUMMARIZATION_SAFETY_RATIO = 0.5;
+const CHARS_PER_TOKEN = 4;
+
+export function computeSummarizationBudget(modelId: string): number {
+  const contextTokens = getContextWindow(modelId);
+  const reservedTokens = Math.floor(contextTokens * SUMMARIZATION_SAFETY_RATIO);
+  return reservedTokens * CHARS_PER_TOKEN;
+}

@@ -1,10 +1,10 @@
 import { generateText, stepCountIs } from "ai";
-import { ollamaProvider } from "~/server/clients/ollama";
 import { db } from "~/server/clients/db";
 import { createCustomTools } from "../tools";
 import { serializeMessages } from "./prompts";
 import type { ReconstructedMessage } from "../types";
-import { getModelProvider, resolveModelId } from "../model-utils";
+import { getModelProvider, buildLLM, llmTimeoutFor } from "../model-utils";
+import { computeSummarizationBudget } from "../context/context-window";
 import { PIIVault } from "../pii";
 
 const FLUSH_SYSTEM_PROMPT =
@@ -41,9 +41,7 @@ export async function runMemoryFlush(
   try {
     const provider = getModelProvider(anthropicModel);
     const isOllama = provider === "ollama";
-    const model = isOllama
-      ? ollamaProvider(anthropicModel)
-      : resolveModelId(anthropicModel);
+    const model = buildLLM(anthropicModel);
 
     const allCustomTools = createCustomTools(instanceId);
     const memoryTools = {
@@ -52,6 +50,11 @@ export async function runMemoryFlush(
     };
 
     const contextSummary = serializeMessages(messages);
+    const budget = computeSummarizationBudget(anthropicModel);
+    const cappedContext =
+      contextSummary.length > budget
+        ? `... [earlier context omitted] ...\n${contextSummary.slice(-budget)}`
+        : contextSummary;
 
     // Redact PII before sending to external LLMs. If the main agent's
     // PIIVault was passed in, reuse its registrations (which include
@@ -61,12 +64,12 @@ export async function runMemoryFlush(
       !isOllama
         ? piiVault ?? new PIIVault()
         : null;
-    const safeContext = vault ? await vault.redact(contextSummary) : contextSummary;
+    const safeContext = vault ? await vault.redact(cappedContext) : cappedContext;
 
     const flushPrompt = `Here is the recent conversation context:\n\n${safeContext}\n\n${FLUSH_USER_PROMPT}`;
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const timeout = setTimeout(() => controller.abort(), llmTimeoutFor(flushPrompt));
 
     let result;
     try {

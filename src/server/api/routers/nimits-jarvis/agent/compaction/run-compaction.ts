@@ -2,7 +2,6 @@
 // Adaptive chunking / staged summarization from openclaw: src/agents/compaction.ts:110-129, 244-305
 // Fallback chain from openclaw: src/agents/compaction.ts:176-242
 import { generateText } from "ai";
-import { ollamaProvider } from "~/server/clients/ollama";
 import { db } from "~/server/clients/db";
 import type { ReconstructedMessage } from "../types";
 import { estimateMessageTokens } from "../context/token-estimation";
@@ -15,7 +14,8 @@ import {
   buildToolFailuresSuffix,
 } from "./prompts";
 import { sanitizeString } from "../context/build-context";
-import { getModelProvider, resolveModelId } from "../model-utils";
+import { getModelProvider, buildLLM, llmTimeoutFor } from "../model-utils";
+import { computeSummarizationBudget } from "../context/context-window";
 import { PIIVault } from "../pii";
 
 interface CompactionParams {
@@ -74,14 +74,11 @@ async function summarize(
   conversationText: string,
   previousSummary: string | null,
 ): Promise<string> {
-  const provider = getModelProvider(anthropicModel);
-  const model = provider === "ollama"
-    ? ollamaProvider(anthropicModel)
-    : resolveModelId(anthropicModel);
+  const model = buildLLM(anthropicModel);
 
   // Redact PII before sending to external LLMs.
   // Local Ollama models are exempt since data stays on-device.
-  const vault = provider !== "ollama" ? new PIIVault() : null;
+  const vault = getModelProvider(anthropicModel) !== "ollama" ? new PIIVault() : null;
 
   const safeConversation = sanitizeString(conversationText);
   const safePreviousSummary = previousSummary ? sanitizeString(previousSummary) : null;
@@ -99,7 +96,7 @@ async function summarize(
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(() => controller.abort(), llmTimeoutFor(prompt));
 
   try {
     const result = await generateText({
@@ -141,20 +138,17 @@ async function stagedSummarize(
     firstSummary,
   );
 
-  const mergeProvider = getModelProvider(anthropicModel);
-  const mergeModel = mergeProvider === "ollama"
-    ? ollamaProvider(anthropicModel)
-    : resolveModelId(anthropicModel);
+  const mergeModel = buildLLM(anthropicModel);
 
   // Redact PII before the merge call. firstSummary and secondSummary were
   // already restored by their individual summarize() calls, so they contain
   // real PII values that must be redacted before reaching an external merge LLM.
-  const mergeVault = mergeProvider !== "ollama" ? new PIIVault() : null;
+  const mergeVault = getModelProvider(anthropicModel) !== "ollama" ? new PIIVault() : null;
   const mergeContent = `<summary-1>\n${firstSummary}\n</summary-1>\n\n<summary-2>\n${secondSummary}\n</summary-2>\n\n${MERGE_SUMMARIES_PROMPT}`;
   const safeMergeContent = mergeVault ? await mergeVault.redact(mergeContent) : mergeContent;
 
   const mergeController = new AbortController();
-  const mergeTimeout = setTimeout(() => mergeController.abort(), 30_000);
+  const mergeTimeout = setTimeout(() => mergeController.abort(), llmTimeoutFor(safeMergeContent));
 
   try {
     const mergeResult = await generateText({
@@ -189,6 +183,39 @@ function stripLargeToolResults(
   });
 }
 
+/**
+ * Last-resort fallback when LLM summarization fails: keep the last `n`
+ * user/assistant TEXT messages verbatim so the human's intent is never lost.
+ * Returns the string to use as the summary, or null if there is no text content.
+ */
+export function keepLastTextFallback(
+  messages: ReconstructedMessage[],
+  n = 5,
+): string | null {
+  const lines: string[] = [];
+  // Walk newest-first so we keep the most recent text turns.
+  for (let i = messages.length - 1; i >= 0 && lines.length < n; i--) {
+    const msg = messages[i]!;
+    if (msg.role === "user") {
+      lines.unshift(`[User]: ${msg.content}`);
+      continue;
+    }
+    if (msg.role === "assistant" && typeof msg.content === "string") {
+      lines.unshift(`[Assistant]: ${msg.content}`);
+      continue;
+    }
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      const text = msg.content
+        .filter((p) => p.type === "text" && Boolean((p as { text?: string }).text))
+        .map((p) => (p as { text: string }).text)
+        .join("\n");
+      if (text) lines.unshift(`[Assistant]: ${text}`);
+    }
+  }
+  if (lines.length === 0) return null;
+  return lines.join("\n");
+}
+
 export async function runCompaction(
   params: CompactionParams,
 ): Promise<CompactionResult | null> {
@@ -212,10 +239,19 @@ export async function runCompaction(
   let summary: string;
   let llmFailed = false;
 
+  // Derive a safe char budget from this model's context window (generalized
+  // across all providers) so we never send an oversized payload to the model.
+  const budget = computeSummarizationBudget(anthropicModel);
+
   try {
     const conversationText = serializeMessages(messagesToCompact);
+    // Truncate oversized conversations to the model budget, preserving the
+    // MOST RECENT content (truncate from the front).
+    const capped = conversationText.length > budget
+      ? `... [earlier context omitted] ...\n${conversationText.slice(-budget)}`
+      : conversationText;
 
-    if (conversationText.length > ADAPTIVE_CHUNK_THRESHOLD) {
+    if (capped.length > ADAPTIVE_CHUNK_THRESHOLD) {
       summary = await stagedSummarize(
         anthropicModel,
         messagesToCompact,
@@ -224,7 +260,7 @@ export async function runCompaction(
     } else {
       summary = await summarize(
         anthropicModel,
-        conversationText,
+        capped,
         previousSummary,
       );
     }
@@ -234,15 +270,22 @@ export async function runCompaction(
     try {
       const stripped = stripLargeToolResults(messagesToCompact);
       const strippedText = serializeMessages(stripped);
+      const cappedStripped = strippedText.length > budget
+        ? `... [earlier context omitted] ...\n${strippedText.slice(-budget)}`
+        : strippedText;
       summary = await summarize(
         anthropicModel,
-        strippedText,
+        cappedStripped,
         previousSummary,
       );
       llmFailed = false;
     } catch (innerError) {
       console.warn("[compaction] stripped summarize also failed:", innerError);
-      summary = `Conversation covered ${messagesToCompact.length} messages. Summary unavailable due to context limits.`;
+      // Better last-resort: preserve the most recent human intent verbatim.
+      const fallback = keepLastTextFallback(messagesToCompact, 5);
+      summary = fallback
+        ? `Conversation compaction summary unavailable. Most recent messages preserved verbatim:\n\n${fallback}`
+        : `Conversation covered ${messagesToCompact.length} messages. Summary unavailable due to context limits.`;
     }
   }
 

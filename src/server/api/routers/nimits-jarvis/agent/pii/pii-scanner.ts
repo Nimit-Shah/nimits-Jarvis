@@ -133,6 +133,13 @@ const PATTERNS: PatternEntry[] = [
         const prev = text.charAt(idx - 1);
         if (/[a-zA-Z0-9]/.test(prev)) return false;
       }
+      // Reject if followed by alphanumeric — the number is a fragment of a
+      // longer identifier (e.g. a hex plan_id "63869336581e41d29..."). A real
+      // phone number is bounded by non-alphanumeric characters or end-of-text.
+      if (idx !== undefined && text) {
+        const next = text.charAt(idx + m.length);
+        if (next !== "" && /[a-zA-Z0-9]/.test(next)) return false;
+      }
       return true;
     }
   },
