@@ -31,7 +31,12 @@ import { clearStreamingMessage } from "~/server/clients/redis";
 import type { ReconstructedMessage } from "./types";
 import { getModelProvider, isAnthropicModel, buildLLM } from "./model-utils";
 import { optimizeToolSchemas } from "./tool-optimizer";
-import { PIIVault, PIITransportShield } from "./pii";
+import {
+  PIIVault,
+  PIITransportShield,
+  stripResidualTokens,
+  deepStripResidualTokens,
+} from "./pii";
 
 type MessageSource = "web" | "telegram" | "cron";
 
@@ -62,12 +67,17 @@ function wrapToolExecutors(
           // Step 1: Restore PII tokens in tool inputs before sending
           // to Composio. The LLM generated tool args may contain PII tokens
           // like [CLAW_EMAIL_A1B2] that need to be restored to real values.
+          // After restore, deep-strip any residual (orphan) token the vault
+          // could not resolve — otherwise it would be persisted verbatim by
+          // durable tools (memory_save, Mnemosyne) and re-leak forever.
           const [input] = args;
           // The AI SDK passes a toolCallId inside the execution options (args[1]).
           const options = args[1] as { toolCallId?: string } | undefined;
           const tid = options?.toolCallId;
           // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-          const restoredInput = vault ? vault.restoreDeep(input) : input;
+          const restoredInput = deepStripResidualTokens(
+            vault ? vault.restoreDeep(input) : input,
+          );
           // Cache the restored (real) input ONCE so DB persistence + any UI
           // re-render reads the exact same value the third-party tool saw.
           if (vault && tid) {
@@ -486,9 +496,11 @@ export async function prepareAgentRun(
           if (stepText) {
             // Restore PII tokens back to original values before persisting.
             // The database stores real data; only the LLM saw redacted tokens.
-            const restoredText = piiVault
-              ? piiVault.restore(stepText)
-              : stepText;
+            // Strip any residual (orphan) token restore() cannot resolve so
+            // the transcript never stores a raw placeholder that would re-leak.
+            const restoredText = stripResidualTokens(
+              piiVault ? piiVault.restore(stepText) : stepText,
+            );
             assistantParts.push({ type: "text" as const, text: restoredText });
           }
 
@@ -500,9 +512,9 @@ export async function prepareAgentRun(
               ? step.reasoning.map((r) => (r as { text?: string }).text ?? "").filter(Boolean).join("\n")
               : "");
           if (stepReasoning) {
-            const restoredReasoning = piiVault
-              ? piiVault.restore(stepReasoning)
-              : stepReasoning;
+            const restoredReasoning = stripResidualTokens(
+              piiVault ? piiVault.restore(stepReasoning) : stepReasoning,
+            );
             assistantParts.push({
               type: "reasoning" as const,
               text: restoredReasoning,

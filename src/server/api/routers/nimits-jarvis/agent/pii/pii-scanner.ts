@@ -31,12 +31,19 @@ const EMAIL_RE =
  * - +1 (234) 567-8901
  * - +44 7911 123456
  * - +91-98765-43210
+ * - +91 99999 88888 (Indian mobile 5+5 split)
  * - (234) 567-8901
  * - 234-567-8901
  * - 2345678901 (10+ digits)
+ *
+ * Uses a `(?<!\w)` lookbehind (not `\b`) because `\b` can never match before a
+ * non-word char — a `+`/`(`-prefixed number after a space or at string start
+ * would otherwise be missed entirely (the leading country code dropped). Runs
+ * are widened to `\d{2,5}/\d{3,5}/\d{3,5}` so 5+5 digit splits (Indian mobile
+ * format) match. False positives are caught by the post-validator.
  */
 const PHONE_RE =
-  /\b(?:\+\d{1,3}[\s\-.]?)?\(?\d{2,4}\)?[\s\-.]?\d{3,4}[\s\-.]?\d{3,4}(?:\s*(?:ext|x)\s*\d{1,5})?/g;
+  /(?<!\w)(?:\+\d{1,3}[\s\-.]?)?\(?\d{2,5}\)?[\s\-.]?\d{3,5}[\s\-.]?\d{3,5}(?:\s*(?:ext|x)\s*\d{1,5})?/g;
 
 /**
  * Credit card numbers: 13-19 digits, optionally separated by spaces or dashes.
@@ -59,7 +66,7 @@ const IPV4_RE =
  * Also catches generic long alphanumeric strings (32+ chars) that look like secrets.
  */
 const API_KEY_RE =
-  /\b(?:sk-[a-zA-Z0-9]{20,}|pk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36,}|gho_[a-zA-Z0-9]{36,}|ghs_[a-zA-Z0-9]{36,}|ghr_[a-zA-Z0-9]{36,}|xox[bpa]-[a-zA-Z0-9\-]{20,}|sk-ant-[a-zA-Z0-9\-]{20,}|AIza[a-zA-Z0-9\-_]{35})\b/g;
+  /\b(?:sk-(?:proj-)?[a-zA-Z0-9]{20,}|pk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36,}|gho_[a-zA-Z0-9]{36,}|ghs_[a-zA-Z0-9]{36,}|ghr_[a-zA-Z0-9]{36,}|xox[bpa]-[a-zA-Z0-9\-]{20,}|sk-ant-[a-zA-Z0-9\-]{20,}|AIza[a-zA-Z0-9\-_]{35})\b/g;
 
 /**
  * LinkedIn URNs (Uniform Resource Names) — personally identifiable identifiers
@@ -139,6 +146,14 @@ const PATTERNS: PatternEntry[] = [
       if (idx !== undefined && text) {
         const next = text.charAt(idx + m.length);
         if (next !== "" && /[a-zA-Z0-9]/.test(next)) return false;
+      }
+      // Reject a decimal fraction immediately after the match — e.g. a Slack
+      // message timestamp "1401383885.000061": the 10-digit epoch is not a
+      // phone number, it is an ID with a fractional part. A real phone is never
+      // followed by a `.` + digit.
+      if (idx !== undefined && text) {
+        const after = text.slice(idx + m.length, idx + m.length + 2);
+        if (/^\.\d/.test(after)) return false;
       }
       return true;
     }
@@ -247,6 +262,7 @@ const PII_FIELD_PATHS: Array<{
     { path: ["surname"], type: "person_name" },
     { path: ["emailAddresses", "*", "address"], type: "email" },
     { path: ["phoneNumbers", "*", "number"], type: "phone" },
+    { path: ["phoneNumbers", "*", "value"], type: "phone" },
     { path: ["homePhones", "*"], type: "phone" },
     { path: ["mobilePhone"], type: "phone" },
     { path: ["businessPhones", "*"], type: "phone" },
@@ -291,6 +307,18 @@ export function extractStructuredPII(obj: unknown): PIIMatch[] {
       if (typeof value === "string" && value.trim().length > 1) {
         const trimmed = value.trim();
         if (trimmed.length <= 1 || isObviousNonPII(trimmed)) continue;
+        // Exact-path person names are also subject to the functional-name guard
+        // (a top-level `name` holding a filename/title is not a person).
+        if (
+          fieldPath.type === "person_name" &&
+          isFunctionalNameValue(
+            {},
+            fieldPath.path[fieldPath.path.length - 1]!,
+            trimmed,
+          )
+        ) {
+          continue;
+        }
         if (seen.has(trimmed)) continue;
         seen.add(trimmed);
 
@@ -334,6 +362,8 @@ const PII_KEY_HEURISTICS: Record<string, PIIType> = {
   first_name: "person_name",
   lastname: "person_name",
   last_name: "person_name",
+  familyname: "person_name",
+  family_name: "person_name",
   surname: "person_name",
   real_name: "person_name",
   author_name: "person_name",
@@ -390,7 +420,16 @@ function deepWalkPIIByKeyName(
 
     if (piiType && typeof value === "string") {
       const trimmed = value.trim();
-      if (trimmed.length > 1 && !isObviousNonPII(trimmed)) {
+      if (
+        trimmed.length > 1 &&
+        !isObviousNonPII(trimmed) &&
+        // The bare `name` key is ambiguous: a filename / sheet title / Slack
+        // channel name must NOT be minted as a person name.
+        !(
+          piiType === "person_name" &&
+          isFunctionalNameValue(obj, normalizedKey, trimmed)
+        )
+      ) {
         matches.push({
           type: piiType,
           value: trimmed,
@@ -459,6 +498,41 @@ function isObviousNonPII(value: string): boolean {
     return true;
   }
   return false;
+}
+
+/** Own-property check safe against prototype pollution. */
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+/**
+ * Whether a value under the bare `name` key is a functional entity name (a
+ * filename, a sheet/folder title, a Slack channel) rather than a person name.
+ *
+ * Only the ambiguous `name` key is guarded — `displayname`, `givenname`,
+ * `fullname`, etc. are overwhelmingly real person names and stay registered.
+ * Guards (any one triggers a skip):
+ *   1. File-extension shape: "budget.xlsx", "resume.pdf", "notes.txt", ...
+ *   2. Contains a digit: "Budget 2026", "Reports 2026" (person names don't).
+ *   3. Container-aware: the parent object is a Drive file/folder or attachment
+ *      (carries `mimeType`) or a Slack channel (`is_private` / `members`).
+ * Real names like "Nimit Shah" / "Bob" / "Kiran B." all pass these guards.
+ */
+function isFunctionalNameValue(
+  parent: object,
+  key: string,
+  value: string,
+): boolean {
+  if (key !== "name") return false;
+  if (/\.(?:pdf|xlsx?|docx?|pptx?|txt|csv|md|png|jpe?g|gif|svg|webp|ts|js|json|yaml|yml|zip|gz)$/i.test(value)) {
+    return true;
+  }
+  if (/\d/.test(value)) return true;
+  return (
+    hasOwn(parent, "mimeType") ||
+    hasOwn(parent, "is_private") ||
+    hasOwn(parent, "members")
+  );
 }
 
 // ─── Enhanced Scanner (All 4 Layers) ─────────────────────────────

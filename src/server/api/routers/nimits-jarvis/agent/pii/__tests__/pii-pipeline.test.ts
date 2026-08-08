@@ -4,6 +4,12 @@ import { scanForPII, scanForPIIEnhanced, extractStructuredPII } from "../pii-sca
 import { IdentityRegistry } from "../identity-registry";
 import { classifyPII, resetDeBERTa, forceCircuitOpen } from "../deberta-classifier";
 import { isProtectedTerm } from "../protected-terms";
+import {
+  stripResidualTokens,
+  toHuman,
+  toHumanDeep,
+  toModel,
+} from "../brands";
 
 // ─── Test Helpers ─────────────────────────────────────────────────
 
@@ -888,6 +894,333 @@ async function runAllTests() {
     );
   });
 
+  // ── Fix 0/1/2/3/4 regression suite ──
+  // Guards the observed production defects:
+  //  - Fix 0: registered names must not corrupt larger identifiers (letter-mangling)
+  //  - Fix 1: re-redaction must never nest / re-tokenize existing tokens
+  //  - Fix 2: restore must return the ORIGINAL raw span (no whitespace drift)
+  //  - Fix 3: functional metadata (paths, files, repos, models) stays readable
+  //  - Fix 4: 1-char "names" are noise, never tokenized
+  console.log("\n=== Fix 0-4 regression suite ===\n");
+
+  await runTest("registered name never corrupts a larger identifier (Fix 0)", async () => {
+    // Previously "Nimits" would split inside "Nimits-jarvis" and "Composio"
+    // inside "composio.ts" / "Composio" package names → letter-mangling.
+    const vault = new PIIVault();
+    vault.registerPII("person_name", "Nimits");
+    vault.registerPII("person_name", "Composio");
+    const redacted = await vault.redact(
+      "Nimits-jarvis uses composio.ts and the Composio CLI. Nimits is the author.",
+    );
+    assert(
+      redacted.includes("Nimits-jarvis"),
+      `Nimits-jarvis must stay intact, got: ${redacted}`,
+    );
+    assert(
+      redacted.includes("composio.ts"),
+      `composio.ts must stay intact, got: ${redacted}`,
+    );
+    assert(
+      redacted.includes("Composio CLI"),
+      `Composio CLI must stay intact, got: ${redacted}`,
+    );
+    assert(
+      /\[CLAW_PERSON_NAME_[A-F0-9]{4}\]/.test(redacted),
+      `standalone Nimits should still be tokenized, got: ${redacted}`,
+    );
+    // Restore must round-trip cleanly — no mangled fragments remain.
+    const restored = vault.restore(redacted);
+    assert(
+      !restored.includes("CLAW_"),
+      `restore should clear all tokens, got: ${restored}`,
+    );
+  });
+
+  await runTest("email local part is fully tokenized when pre-registered (Fix 0)", async () => {
+    // In the real pipeline registerStructuredPII seeds emails first, so Step 1
+    // must replace the FULL email (length-desc), never a partial name fragment.
+    const vault = new PIIVault();
+    vault.registerPII("email", "nimit.shah@gmail.com");
+    const redacted = await vault.redact(
+      "Email nimit.shah@gmail.com here and Nimits-jarvis repo.",
+    );
+    assert(
+      redacted.includes("CLAW_EMAIL_"),
+      `email should be fully tokenized, got: ${redacted}`,
+    );
+    assert(
+      !redacted.includes("nimit.shah"),
+      `raw email must not survive, got: ${redacted}`,
+    );
+    const restored = vault.restore(redacted);
+    assert(
+      restored.includes("nimit.shah@gmail.com"),
+      `email should restore exactly, got: ${restored}`,
+    );
+  });
+
+  await runTest("re-redaction never nests tokens (Fix 1)", async () => {
+    // Simulates compaction replay: a tokenized payload re-enters a fresh vault.
+    // The nested "[CLAW_PERSON_NAME_[CLAW_...]" corruption must not happen.
+    const v1 = new PIIVault();
+    v1.registerPII("person_name", "Nimit Shah");
+    const redacted = await v1.redact("Name: Nimit Shah, email: a@b.com");
+    assert(
+      !redacted.includes("[CLAW_[") && !redacted.includes("CLAW_CLAW_"),
+      `no nested tokens allowed, got: ${redacted}`,
+    );
+    // A FRESH vault re-redacting tokenized text must leave tokens alone.
+    const v2 = new PIIVault();
+    const reRedacted = await v2.redact(
+      `Name: ${redacted.slice(0, redacted.indexOf("email"))}email: a@b.com`,
+    );
+    assert(
+      !reRedacted.includes("[CLAW_[") && !reRedacted.includes("CLAW_CLAW_"),
+      `re-redaction must not nest, got: ${reRedacted}`,
+    );
+    assert(
+      !reRedacted.includes("Nimit"),
+      `raw name must not reappear on re-redaction, got: ${reRedacted}`,
+    );
+  });
+
+  await runTest("restore returns the original raw span (Fix 2)", async () => {
+    // The registerPII raw-span change: restore must reproduce the EXACT string
+    // that was redacted, even when it carried surrounding whitespace.
+    const vault = new PIIVault();
+    vault.registerPII("person_name", "Nimit Shah");
+    const redacted = await vault.redact("Meet Nimit Shah tomorrow.");
+    const restored = vault.restore(redacted);
+    assert(
+      restored === "Meet Nimit Shah tomorrow.",
+      `restore must be byte-exact, got: ${restored}`,
+    );
+  });
+
+  await runTest("functional metadata stays readable (Fix 3)", async () => {
+    // Paths, files, repos, models, providers must NOT be tokenized.
+    const vault = new PIIVault();
+    const toolResult = {
+      path: "src/server/index.ts",
+      file: "pii-tokenizer.ts",
+      download_url: "https://api.github.com/repos/nimits-jarvis/contents/x",
+      html_url: "https://github.com/nimits-jarvis/blob/main/x.ts",
+      default_branch: "main",
+      login: "nimits-jarvis",
+      model: "claude-4.5-sonnet",
+      provider: "openrouter",
+    };
+    const redacted = await vault.redactToolResult(toolResult) as Record<string, unknown>;
+    assert(
+      redacted.path === "src/server/index.ts",
+      `path must be preserved, got: ${redacted.path}`,
+    );
+    assert(
+      redacted.file === "pii-tokenizer.ts",
+      `filename must be preserved, got: ${redacted.file}`,
+    );
+    assert(
+      String(redacted.download_url).includes("nimits-jarvis"),
+      `download_url must be preserved, got: ${redacted.download_url}`,
+    );
+    assert(
+      String(redacted.html_url).includes("nimits-jarvis"),
+      `html_url must be preserved, got: ${redacted.html_url}`,
+    );
+    assert(
+      redacted.model === "claude-4.5-sonnet",
+      `model must be preserved, got: ${redacted.model}`,
+    );
+    assert(
+      redacted.provider === "openrouter",
+      `provider must be preserved, got: ${redacted.provider}`,
+    );
+  });
+
+  await runTest("file-like entity name/full_name are preserved (Fix 3)", async () => {
+    // Objects carrying path+type+a content URL use name/full_name for the FILE
+    // or repo — those must bypass person-name redaction.
+    const vault = new PIIVault();
+    vault.registerPII("person_name", "Nimit");
+    const toolResult = {
+      type: "file",
+      path: "src/index.ts",
+      download_url: "https://raw.githubusercontent.com/nimits-jarvis/x/main/src/index.ts",
+      name: "index.ts",
+    };
+    const redacted = await vault.redactToolResult(toolResult) as Record<string, unknown>;
+    assert(
+      redacted.name === "index.ts",
+      `file name must be preserved, got: ${redacted.name}`,
+    );
+    const repo = {
+      type: "repo",
+      full_name: "nimits-jarvis/nimits-jarvis",
+      html_url: "https://github.com/nimits-jarvis/nimits-jarvis",
+      default_branch: "main",
+    };
+    const redacted2 = await vault.redactToolResult(repo) as Record<string, unknown>;
+    assert(
+      redacted2.full_name === "nimits-jarvis/nimits-jarvis",
+      `repo full_name must be preserved, got: ${redacted2.full_name}`,
+    );
+  });
+
+  await runTest("1-char names are noise, never tokenized (Fix 4)", async () => {
+    const vault = new PIIVault();
+    const redacted = await vault.redact("Use p and q in the config.");
+    assert(
+      !redacted.includes("CLAW_"),
+      `single letters must not be tokenized, got: ${redacted}`,
+    );
+  });
+
+  await runTest("kebab/dotted machine strings are not name-tokenized (Fix 3)", async () => {
+    // DeBERTa misclassifies segments of package/model names as persons.
+    const vault = new PIIVault();
+    const redacted = await vault.redact(
+      "Install @composio/claude-agent-sdk and nimits-jarvis from npm. Claude is a model.",
+    );
+    assert(
+      redacted.includes("@composio/claude-agent-sdk"),
+      `package name must be preserved, got: ${redacted}`,
+    );
+    assert(
+      redacted.includes("nimits-jarvis"),
+      `repo name must be preserved, got: ${redacted}`,
+    );
+  });
+
+  await runTest("GitHub account URL fields preserve the login (Gap 3)", async () => {
+    // Regression: the `url`/`followers_url`/... API fields embed the login and
+    // must NOT have it name-tokenized (previously produced
+    // "https://api.github.com/users/[CLAW_PERSON_NAME_XXXX]-Shah/followers").
+    const vault = new PIIVault();
+    vault.registerPII("person_name", "Nimit");
+    const githubUser = {
+      login: "Nimit-Shah",
+      url: "https://api.github.com/users/Nimit-Shah",
+      html_url: "https://github.com/Nimit-Shah",
+      followers_url: "https://api.github.com/users/Nimit-Shah/followers",
+      repos_url: "https://api.github.com/users/Nimit-Shah/repos",
+      events_url: "https://api.github.com/users/Nimit-Shah/events{/privacy}",
+      received_events_url:
+        "https://api.github.com/users/Nimit-Shah/received_events",
+    };
+    const redacted = await vault.redactToolResult(githubUser) as Record<string, unknown>;
+    for (const [key, val] of Object.entries(redacted)) {
+      assert(
+        val === (githubUser as Record<string, unknown>)[key],
+        `GitHub URL field "${key}" must be preserved verbatim, got: ${val}`,
+      );
+    }
+    assert(
+      String(redacted.repos_url).includes("Nimit-Shah"),
+      `repos_url must keep the login, got: ${redacted.repos_url}`,
+    );
+  });
+
+  await runTest("repo template *_url fields preserve the login (Gap 3 suffix rule)", async () => {
+    // The full GITHUB_GET_A_REPOSITORY object carries ~35 *_url template keys
+    // (archive_url, branches_url, clone_url, svn_url, ssh_url, ...). The
+    // _url-suffix bypass must preserve the login in ALL of them, consistently
+    // with url/html_url/git_url — not just the user-profile URL keys.
+    const vault = new PIIVault();
+    vault.registerPII("person_name", "Nimit");
+    const repo = {
+      url: "https://api.github.com/repos/Nimit-Shah/nimits-Jarvis",
+      html_url: "https://github.com/Nimit-Shah/nimits-Jarvis",
+      git_url: "git://github.com/Nimit-Shah/nimits-Jarvis.git",
+      clone_url: "https://github.com/Nimit-Shah/nimits-Jarvis.git",
+      svn_url: "https://github.com/Nimit-Shah/nimits-Jarvis",
+      ssh_url: "git@github.com:Nimit-Shah/nimits-Jarvis.git",
+      archive_url:
+        "https://api.github.com/repos/Nimit-Shah/nimits-Jarvis/{archive_format}{/ref}",
+      branches_url:
+        "https://api.github.com/repos/Nimit-Shah/nimits-Jarvis/branches{/branch}",
+      commits_url:
+        "https://api.github.com/repos/Nimit-Shah/nimits-Jarvis/commits{/sha}",
+      contributors_url:
+        "https://api.github.com/repos/Nimit-Shah/nimits-Jarvis/contributors",
+      avatar_url: "https://avatars.githubusercontent.com/u/53946338?v=4",
+    };
+    const redacted = await vault.redactToolResult(repo) as Record<string, unknown>;
+    for (const [key, val] of Object.entries(redacted)) {
+      assert(
+        val === (repo as Record<string, unknown>)[key],
+        `repo URL field "${key}" must be preserved verbatim, got: ${val}`,
+      );
+    }
+    assert(
+      String(redacted.clone_url).includes("Nimit-Shah"),
+      `clone_url must keep the login, got: ${redacted.clone_url}`,
+    );
+    assert(
+      String(redacted.ssh_url).includes("Nimit-Shah"),
+      `ssh_url must keep the login (and not email-tokenize git@github.com), got: ${redacted.ssh_url}`,
+    );
+  });
+
+  await runTest("profile_url LinkedIn values are still redacted (Gap 3 safety)", async () => {
+    // The _url-suffix bypass has an explicit LinkedIn exclusion set — a
+    // profile_url holding a LinkedIn URL is person PII and must stay redacted.
+    const vault = new PIIVault();
+    const toolResult = {
+      profile_url: "https://www.linkedin.com/in/nimit-shah",
+      url: "https://api.github.com/users/Nimit-Shah",
+    };
+    const redacted = await vault.redactToolResult(toolResult) as Record<string, unknown>;
+    assert(
+      String(redacted.profile_url).includes("CLAW_LINKEDIN_URL_"),
+      `LinkedIn profile_url must still be redacted, got: ${redacted.profile_url}`,
+    );
+    assert(
+      String(redacted.url).includes("Nimit-Shah"),
+      `GitHub url must still be preserved, got: ${redacted.url}`,
+    );
+  });
+
+  await runTest("GitHub plan.name (billing tier) is preserved (Gap 4)", async () => {
+    // Regression: plan.name ("free"/"pro"/"team") was being tokenized as a
+    // person name because `name` is a PII heuristic key at any depth.
+    const vault = new PIIVault();
+    const githubUser = {
+      login: "Nimit-Shah",
+      plan: {
+        name: "pro",
+        space: 976562499,
+        collaborators: 0,
+        private_repos: 10000,
+      },
+    };
+    const redacted = await vault.redactToolResult(githubUser) as {
+      plan: { name: string };
+    };
+    assert(
+      redacted.plan.name === "pro",
+      `plan.name must be preserved, got: ${redacted.plan.name}`,
+    );
+  });
+
+  await runTest("plain name fields are still tokenized (Gap 4 safety)", async () => {
+    // The plan bypass must be container-specific — a bare {name} object (or a
+    // person contact) must STILL be tokenized.
+    const vault = new PIIVault();
+    const redacted = await vault.redactToolResult({
+      name: "Nimit Shah",
+    }) as { name: string };
+    assert(
+      redacted.name.startsWith("[CLAW_PERSON_NAME_"),
+      `bare name must still be tokenized, got: ${redacted.name}`,
+    );
+    const user = { name: "Nimit Shah", email: "nimit@example.com" };
+    const redacted2 = await vault.redactToolResult(user) as { name: string };
+    assert(
+      redacted2.name.startsWith("[CLAW_PERSON_NAME_"),
+      `contact name must still be tokenized, got: ${redacted2.name}`,
+    );
+  });
+
   // ── Step 8: Cache-once tool call restore contract ──
   // The wrapper restores a tool-call input ONCE into a cache; Composio
   // execution and DB persistence both read that SAME cached value — no second
@@ -985,6 +1318,153 @@ async function runAllTests() {
     // empty [] on real failure is not. We reset AFTER so a throw leaves clean state.
     void threw;
     resetDeBERTa();
+  });
+
+  // ── Regressions (injection-suite fixes) ──
+  console.log("\n=== Regressions (injection-suite fixes) ===\n");
+
+  await runTest("API key regex matches sk-proj- project-scoped keys", () => {
+    const matches = scanForPII(
+      "Key: sk-proj-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f",
+    );
+    assert(
+      matches.some((m) => m.type === "api_key"),
+      `sk-proj- key should be api_key, got: ${JSON.stringify(matches)}`,
+    );
+  });
+
+  await runTest("free-text +91 99999 88888 (5+5 split) matches as phone", () => {
+    const matches = scanForPII("Call +91 99999 88888 for details");
+    const phones = matches.filter((m) => m.type === "phone");
+    assert(
+      phones.length === 1 && phones[0]!.value === "+91 99999 88888",
+      `expected full +91 number, got: ${JSON.stringify(phones)}`,
+    );
+  });
+
+  await runTest("Slack message ts is not phone-matched", () => {
+    const matches = scanForPII('"ts":"1401383885.000061"');
+    assert(
+      matches.filter((m) => m.type === "phone").length === 0,
+      `slack ts should not be a phone, got: ${JSON.stringify(matches)}`,
+    );
+  });
+
+  await runTest("phoneNumbers[].value (People API) extracts as phone", () => {
+    const matches = extractStructuredPII({
+      phoneNumbers: [{ value: "+91 99999 88888", type: "mobile" }],
+    });
+    assert(
+      matches.some((m) => m.type === "phone" && m.value === "+91 99999 88888"),
+      `phoneNumbers[].value should extract, got: ${JSON.stringify(matches)}`,
+    );
+  });
+
+  await runTest("bare name-key filenames are not person names", () => {
+    const filenames = extractStructuredPII({ name: "resume.pdf" });
+    const sheets = extractStructuredPII({ name: "Budget 2026" });
+    const channel = extractStructuredPII({
+      channel: { name: "launch-team", is_private: false },
+    });
+    const all = [...filenames, ...sheets, ...channel];
+    assert(
+      all.filter((m) => m.type === "person_name").length === 0,
+      `functional names must not be person names, got: ${JSON.stringify(all)}`,
+    );
+  });
+
+  await runTest("bare name-key real names still register", () => {
+    const matches = extractStructuredPII({ name: "Nimit Shah" });
+    assert(
+      matches.some((m) => m.type === "person_name" && m.value === "Nimit Shah"),
+      `real name under name key should register, got: ${JSON.stringify(matches)}`,
+    );
+  });
+
+  await runTest("familyName registers as person name (incl. people[] wrapper)", () => {
+    const direct = extractStructuredPII({ names: [{ familyName: "Sharma" }] });
+    const wrapped = extractStructuredPII({
+      people: [{ names: [{ familyName: "Sharma" }] }],
+    });
+    const joined = [...direct, ...wrapped];
+    assert(
+      joined.filter((m) => m.type === "person_name" && m.value === "Sharma")
+        .length >= 2,
+      `familyName should register with and without wrapper, got: ${JSON.stringify(joined)}`,
+    );
+  });
+
+  await runTest("stripResidualTokens email token leaves no dangling domain", () => {
+    const got = stripResidualTokens("email: CLAW_EMAIL_FE1A@trustclaw.anon");
+    assert(
+      got === "email: [redacted]",
+      `email token should collapse fully, got: ${got}`,
+    );
+    const bracketed = stripResidualTokens("[CLAW_EMAIL_FE1A]@trustclaw.anon");
+    assert(
+      bracketed === "[redacted]",
+      `bracketed email token should collapse fully, got: ${bracketed}`,
+    );
+  });
+
+  // ── Residual token stripping at human boundaries (brands.ts) ──
+  console.log("\n=== Residual token stripping (brands.ts) ===\n");
+
+  await runTest("stripResidualTokens removes bracketed token", () => {
+    const got = stripResidualTokens("name: [CLAW_PERSON_NAME_542F]");
+    assert(!got.includes("CLAW_"), `token should be stripped, got: ${got}`);
+  });
+
+  await runTest("stripResidualTokens removes unbracketed token", () => {
+    const got = stripResidualTokens("name: CLAW_PERSON_NAME_542F");
+    assert(!got.includes("CLAW_"), `token should be stripped, got: ${got}`);
+  });
+
+  await runTest("stripResidualTokens removes email token", () => {
+    const got = stripResidualTokens("email: CLAW_EMAIL_FE1A@trustclaw.anon");
+    assert(!got.includes("CLAW_"), `email token should be stripped, got: ${got}`);
+  });
+
+  await runTest("stripResidualTokens leaves real text alone", () => {
+    const s = "My friend John lives at john@example.com";
+    assert(stripResidualTokens(s) === s, "real text should be unchanged");
+  });
+
+  await runTest("toHuman strips token the vault cannot resolve", () => {
+    const vault = new PIIVault();
+    vault.registerPII("email", "real@example.com");
+    // Known token restores to the real value...
+    const known = toHuman(vault, toModel("contact real@example.com"));
+    assert(
+      known.includes("real@example.com"),
+      `known token should restore, got: ${known}`,
+    );
+    // ...but a token from a PREVIOUS request (not in this vault's mappings) is
+    // pass-through in restore() and must be stripped so it never reaches a human.
+    const out = toHuman(
+      vault,
+      toModel("[CLAW_PERSON_NAME_542F] emailed real@example.com"),
+    );
+    assert(out.includes("real@example.com"), "known token still restores in toHuman");
+    assert(
+      !out.includes("CLAW_"),
+      `unresolvable token should not reach human, got: ${out}`,
+    );
+  });
+
+  await runTest("toHumanDeep strips tokens nested in objects", () => {
+    const vault = new PIIVault();
+    const out = toHumanDeep(vault, {
+      name: "[CLAW_PERSON_NAME_542F]",
+      email: "CLAW_EMAIL_FE1A@trustclaw.anon",
+      ok: "plain",
+      deep: { t: "[CLAW_CREDIT_CARD_1A2B]" },
+    }) as Record<string, unknown>;
+    const joined = JSON.stringify(out);
+    assert(
+      !joined.includes("CLAW_"),
+      `nested tokens should be stripped, got: ${joined}`,
+    );
   });
 
   // ── Summary ──

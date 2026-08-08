@@ -4,6 +4,7 @@ import { z } from "zod";
 import { auth } from "~/server/auth";
 import { prepareAgentRun } from "~/server/api/routers/nimits-jarvis/agent/setup";
 import type { PIIVault } from "~/server/api/routers/nimits-jarvis/agent/pii";
+import { stripResidualTokens } from "~/server/api/routers/nimits-jarvis/agent/pii/brands";
 import { prewarmDeBERTa } from "~/server/api/routers/nimits-jarvis/agent/pii/deberta-classifier";
 import {
   setStreamingMessage,
@@ -108,13 +109,13 @@ function createPIIRestoreTransform(
       const safe = buffer.slice(0, buffer.length - carryOver.length);
       buffer = carryOver;
       if (safe) {
-        controller.enqueue(encoder.encode(vault.restore(safe)));
+        controller.enqueue(encoder.encode(stripResidualTokens(vault.restore(safe))));
       }
     },
     flush(controller) {
       const tail = decoder.decode();
       buffer += tail;
-      const restored = vault.restore(buffer);
+      const restored = stripResidualTokens(vault.restore(buffer));
       if (restored) {
         controller.enqueue(encoder.encode(restored));
       }
@@ -139,11 +140,11 @@ function createPIIRestoreStringTransform(
       const safe = buffer.slice(0, buffer.length - carryOver.length);
       buffer = carryOver;
       if (safe) {
-        controller.enqueue(vault.restore(safe));
+        controller.enqueue(stripResidualTokens(vault.restore(safe)));
       }
     },
     flush(controller) {
-      const restored = vault.restore(buffer);
+      const restored = stripResidualTokens(vault.restore(buffer));
       if (restored) {
         controller.enqueue(restored);
       }
@@ -258,7 +259,7 @@ export async function POST(request: Request) {
     ...(streamContext
       ? {
           consumeSseStream: ({ stream }) => {
-            const finalStream = piiVault?.hasRedactions
+            const finalStream = piiVault
               ? stream.pipeThrough(createPIIRestoreStringTransform(piiVault))
               : stream;
 
@@ -271,11 +272,13 @@ export async function POST(request: Request) {
       : {}),
   });
 
-  // When PII redaction is active, wrap the response body with a
-  // transform that restores PII tokens back to original values.
-  // The SSE stream contains text like "[EMAIL_1] sent you a message"
-  // which we rewrite to "john@example.com sent you a message".
-  if (piiVault?.hasRedactions && response.body) {
+  // Whenever a vault is active (and even when it has no new registrations this
+  // request), wrap the response body with a transform that restores PII tokens
+  // back to original values and strips any token restore() cannot resolve so a
+  // placeholder never reaches the user. The SSE stream contains text like
+  // "[CLAW_PERSON_NAME_542F] sent you a message" which we rewrite to
+  // "John Doe sent you a message".
+  if (piiVault && response.body) {
     const restored = response.body.pipeThrough(
       createPIIRestoreTransform(piiVault),
     );

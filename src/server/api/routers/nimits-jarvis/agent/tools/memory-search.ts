@@ -8,6 +8,7 @@ import {
 } from "./memory-search.schema";
 import { ollamaProvider } from "~/server/clients/ollama";
 import { env } from "~/env";
+import { stripResidualTokens } from "../pii";
 
 const memorySearchResultRow = z.object({
   id: z.string(),
@@ -51,7 +52,9 @@ async function queryMnemosyne(
     const data = mnemosyneRecallResult.parse(await res.json());
     if (!data.found) return null;
     return data.memories.map((m) => ({
-      content: m.content,
+      // Strip any residual (orphan) token so the model never sees a live
+      // placeholder it can't restore, and never re-echoes one into memory.
+      content: stripResidualTokens(m.content),
       relevance: Math.round((m.score ?? m.importance ?? 0.5) * 100) / 100,
     }));
   } catch {
@@ -87,7 +90,7 @@ async function queryPgVector(
   return results
     .filter((r) => r.similarity > 0.5)
     .map((r) => ({
-      content: r.content,
+      content: stripResidualTokens(r.content),
       relevance: Math.round(r.similarity * 100) / 100,
     }));
 }
@@ -152,7 +155,9 @@ export async function searchMemoriesForContext(
       `,
     );
 
-    return results.filter((r) => r.similarity > 0.5).map((r) => r.content);
+    return results
+      .filter((r) => r.similarity > 0.5)
+      .map((r) => stripResidualTokens(r.content));
   } catch {
     return [];
   }

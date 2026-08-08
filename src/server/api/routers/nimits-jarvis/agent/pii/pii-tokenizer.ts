@@ -81,8 +81,12 @@ export class PIIVault {
     const token = makeToken(type, count);
     const trimmed = value.trim();
     this.forwardMap.set(canonical, token);
-    this.reverseMap.set(token, trimmed);
-    this.mappings.push({ token, original: trimmed, type });
+    // Store the RAW matched span (not the trimmed value) as the restore value so
+    // restore() reinserts the exact original text including any surrounding
+    // whitespace/separators. The dedup key stays canonical-trimmed, so "Nimit "
+    // and "Nimit" share one token while restore returns the first-seen form.
+    this.reverseMap.set(token, value);
+    this.mappings.push({ token, original: value, type });
 
     return token;
   }
@@ -103,20 +107,21 @@ export class PIIVault {
       (a, b) => b.original.length - a.original.length,
     );
     for (const mapping of sortedMappings) {
-      if (result.includes(mapping.original)) {
-        result = result.split(mapping.original).join(mapping.token);
-      }
+      result = replaceRegisteredValue(result, mapping.original, mapping.token);
     }
 
     // Step 2: Run enhanced scanner for remaining PII patterns
     const matches = await scanForPIIEnhanced(result);
     if (matches.length === 0) return result;
 
+    // Idempotency: locate existing tokens so a new match that overlaps one is
+    // skipped (never re-tokenize an already-tokenized span, even partially).
+    const tokenSpans = findTokenSpans(result);
+
     // Process matches from end-to-start so indices remain valid
     for (let i = matches.length - 1; i >= 0; i--) {
       const match = matches[i]!;
-      // Skip if already tokenized
-      if (isTokenString(match.value)) continue;
+      if (this.shouldSkipMatch(match, tokenSpans)) continue;
       const token = this.registerPII(match.type, match.value);
       result = result.slice(0, match.start) + token + result.slice(match.end);
     }
@@ -233,10 +238,36 @@ export class PIIVault {
     if (value !== null && typeof value === "object") {
       const result: Record<string, unknown> = {};
       const entries = Object.entries(value as Record<string, unknown>);
+      // Container-aware functional-entity detection: objects that carry file or
+      // repo metadata (a `path` + `type` + a content URL) use `name` / `full_name`
+      // for the FILENAME / repo id, NOT a person. Bypass those sibling values too,
+      // even though `name` / `full_name` are otherwise PII heuristic keys.
+      const isFileLikeEntity =
+        hasOwn(value, "path") &&
+        hasOwn(value, "type") &&
+        (hasOwn(value, "download_url") || hasOwn(value, "html_url"));
+      // Container-aware plan detection: GitHub's `plan` object carries exactly
+      // these three numeric siblings. Its `name` is the billing tier
+      // (free/pro/team/enterprise), NOT a person — bypass it too.
+      const isPlanLikeEntity =
+        hasOwn(value, "space") &&
+        hasOwn(value, "collaborators") &&
+        hasOwn(value, "private_repos");
       for (const [key, val] of entries) {
         const lowerKey = key.toLowerCase();
-        if (SYSTEM_METADATA_KEYS.has(lowerKey)) {
-          // Bypass PII scanning for structural API metadata, tool slugs, and schemas
+        if (
+          SYSTEM_METADATA_KEYS.has(lowerKey) ||
+          // Any *_url key is a functional URL field (GitHub API templates like
+          // archive_url/branches_url/clone_url/svn_url/ssh_url, avatar_url, etc.)
+          // and must pass through verbatim so the login embedded in it stays
+          // consistent with `login`/`html_url`. EXCEPT the LinkedIn keys below,
+          // which are person-level PII and must keep being redacted.
+          (lowerKey.endsWith("_url") && !LINKEDIN_URL_KEYS.has(lowerKey)) ||
+          ((isFileLikeEntity || isPlanLikeEntity) &&
+            (lowerKey === "name" || lowerKey === "full_name"))
+        ) {
+          // Bypass PII scanning for structural API metadata, tool slugs, schemas,
+          // and functional file/repo identifiers
           result[key] = val;
         } else {
           result[key] = await this.deepRedact(val, depth + 1);
@@ -281,40 +312,65 @@ export class PIIVault {
 
     // Step 1: Replace known PII values (registered from structural extraction).
     // Sort by original length descending so longer strings are replaced first.
-    // Use word boundaries for word/alphanumeric strings to avoid substring corruption
-    // (e.g., prevents "coun" from replacing inside "Country" or "County").
+    // Uses whole-word boundaries so a value never corrupts a larger identifier
+    // (e.g. prevents "coun" replacing inside "Country"/"County" and prevents
+    // "Nimits" replacing inside "Nimits-jarvis" or "composio.ts").
     let result = text;
     const sortedMappings = [...this.mappings].sort(
       (a, b) => b.original.length - a.original.length,
     );
     for (const mapping of sortedMappings) {
-      const orig = mapping.original;
-      if (!result.includes(orig)) continue;
-
-      if (/^\w+$/.test(orig)) {
-        const regex = new RegExp(`\\b${escapeRegExp(orig)}\\b`, "g");
-        result = result.replace(regex, mapping.token);
-      } else {
-        result = result.split(orig).join(mapping.token);
-      }
+      result = replaceRegisteredValue(result, mapping.original, mapping.token);
     }
 
     // Step 2: Scan for new PII patterns in the (partially redacted) text
     const newMatches = await scanForPIIEnhanced(result);
     if (newMatches.length === 0) return result;
 
+    // Idempotency: locate existing tokens so a new match that overlaps one is
+    // skipped (never re-tokenize an already-tokenized span, even partially).
+    const tokenSpans = findTokenSpans(result);
+
     // Process from end to preserve indices
     for (let i = newMatches.length - 1; i >= 0; i--) {
       const match = newMatches[i]!;
-      // Skip if this span was already replaced by a token
-      if (isTokenString(match.value)) continue;
-
+      if (this.shouldSkipMatch(match, tokenSpans)) continue;
       const token = this.registerPII(match.type, match.value);
       result =
         result.slice(0, match.start) + token + result.slice(match.end);
     }
 
     return result;
+  }
+
+  /**
+   * Whether a scanner match should be skipped before tokenization.
+   *
+   * 1. Idempotency: a match whose value already contains a PII token (including
+   *    nested or unbracketed forms that `isTokenString` misses) is never
+   *    re-tokenized.
+   * 2. Min-length: a 1-char "name" is noise, not PII — never mint a token for it.
+   * 3. Zero-width: DeBERTa may emit a seed-only match when it cannot locate the
+   *    span ({start:0,end:0}). Register it so a later pass can resolve it, but
+   *    never slice-replace (a 0/0 slice would PREPEND the token to the text and
+   *    corrupt it).
+   * 4. Overlap: a match overlapping an existing token span is a fragment of an
+   *    already-tokenized value.
+   */
+  private shouldSkipMatch(
+    match: PIIMatch,
+    tokenSpans: Array<{ start: number; end: number }>,
+  ): boolean {
+    if (containsTokenPattern(match.value)) return true;
+    if (match.value.trim().length < 2) return true;
+    if (match.start === 0 && match.end === 0) {
+      this.registerPII(match.type, match.value);
+      return true;
+    }
+    for (const s of tokenSpans) {
+      if (match.start < s.end && match.end > s.start) return true;
+    }
+    return false;
   }
 }
 
@@ -366,6 +422,60 @@ const SYSTEM_METADATA_KEYS = new Set([
   "lon",
   "icon",
   "weather",
+  // Path / file metadata (GitHub content, file uploads, downloads) — the LLM
+  // must be able to read these verbatim to reason about repositories and paths.
+  "path",
+  "file",
+  "filename",
+  "file_name",
+  "extension",
+  "default_branch",
+  "download_url",
+  "html_url",
+  "blob_url",
+  "git_url",
+  // Repo / account functional identifiers — `login` is excluded deliberately:
+  // it is technically a username, but the agent needs it to reference repos
+  // (owner/login) and redacting it produced nested-token corruption.
+  "repo",
+  "repository",
+  "login",
+  "slug",
+  "ref",
+  "sha",
+  "branch",
+  "node_id",
+  // GitHub account / API URL fields — these embed the login (e.g.
+  // https://api.github.com/users/Nimit-Shah/followers) and the agent must be
+  // able to read them verbatim to match against `login` / `html_url`. Keeping
+  // them unredacted keeps all GitHub URL forms consistent (html_url / git_url /
+  // download_url were already bypassed).
+  "url",
+  "avatar_url",
+  "followers_url",
+  "following_url",
+  "gists_url",
+  "starred_url",
+  "subscriptions_url",
+  "organizations_url",
+  "repos_url",
+  "events_url",
+  "received_events_url",
+  "comments_url",
+  // Model / version / provider identifiers
+  "model",
+  "model_id",
+  "version",
+  "provider",
+  // Request / session / job plumbing
+  "session_id",
+  "sessionid",
+  "requestid",
+  "request_id",
+  "logid",
+  "taskid",
+  "jobid",
+  "execution_id",
   // Technical / API pagination / system & account IDs
   "nextpagetoken",
   "pagetoken",
@@ -390,7 +500,74 @@ const SYSTEM_METADATA_KEYS = new Set([
   "etag",
 ]);
 
+/**
+ * Keys ending in `_url` that are NOT functional URLs but person-level PII.
+ * The `_url`-suffix bypass (deepRedact) must never swallow these — they are
+ * exactly the LinkedIn profile-identifier keys the structural heuristics flag.
+ * Keeping this list small is intentional: any other *_url key is treated as a
+ * functional API URL (clone_url, svn_url, archive_url, avatar_url, ...).
+ */
+const LINKEDIN_URL_KEYS = new Set([
+  "profile_url",
+  "profileurl",
+  "vanity_url",
+  "vanityname",
+  "vanity_name",
+  "publicidentifier",
+]);
+
+/** Own-property check that is safe against prototype pollution. */
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 function escapeRegExp(str: string): string {
   return str.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+}
+
+/**
+ * Replace a registered original value with its token, matching ONLY as a whole
+ * word when the value is a plain word. This is the single boundary rule applied
+ * at EVERY replacement point (redact() and redactString()).
+ *
+ * Boundaries EXCLUDE `.`, `/`, `-`, `_` — so a registered "Nimits" never matches
+ * inside "Nimits-jarvis", "composio.ts", or "Nimits_1", and a registered
+ * "composio" never matches inside "composio.ts". Only genuine word boundaries
+ * (space, punctuation, string edges, unicode letters) trigger a replacement.
+ * Multi-word / non-word values (emails, URLs) fall back to an escaped exact match.
+ */
+function replaceRegisteredValue(
+  text: string,
+  original: string,
+  token: string,
+): string {
+  if (!text.includes(original)) return text;
+  if (/^\w+$/.test(original)) {
+    const regex = new RegExp(
+      `(?<![a-zA-Z0-9_./-])${escapeRegExp(original)}(?![a-zA-Z0-9_./-])`,
+      "g",
+    );
+    return text.replace(regex, token);
+  }
+  return text.split(original).join(token);
+}
+
+/** Global variant of CONTAINS_TOKEN_RE for walking all token spans in text. */
+const CONTAINS_TOKEN_GLOBAL_RE = new RegExp(CONTAINS_TOKEN_RE.source, "g");
+
+/**
+ * Returns the [start, end) spans of every PII token present in `text`.
+ * Used for idempotency: a new scan match overlapping an existing token span is
+ * a fragment of an already-tokenized value and must not be re-tokenized.
+ */
+function findTokenSpans(text: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  if (!text) return spans;
+  CONTAINS_TOKEN_GLOBAL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = CONTAINS_TOKEN_GLOBAL_RE.exec(text)) !== null) {
+    spans.push({ start: m.index, end: m.index + m[0].length });
+  }
+  return spans;
 }
 

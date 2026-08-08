@@ -25,7 +25,7 @@
  */
 
 import type { PIIType } from "./pii-types";
-import { isTokenString } from "./pii-tokenizer";
+import { containsTokenPattern } from "./pii-tokenizer";
 import { isProtectedTerm } from "./protected-terms";
 
 export interface ClassificationResult {
@@ -245,11 +245,53 @@ function findWholeWordSpan(
       idx === 0 || !/[a-zA-Z0-9_]/.test(before);
     const wordBoundaryAfter = !/[a-zA-Z0-9_]/.test(after);
     if (wordBoundaryBefore && wordBoundaryAfter) {
+      // Extra guard: the span must not be a component of a larger functional
+      // identifier (path, extension, kebab model/package name). Otherwise a
+      // fragment like "composio" inside "composio.ts" or "jar" inside
+      // "nimits-jarvis" would be tokenized, corrupting the surrounding text.
+      if (isIdentifierFragment(text, span, idx)) {
+        idx += 1;
+        continue;
+      }
       return { start: idx, end: idx + span.length };
     }
     // Not a whole word — keep searching after this occurrence
     idx += 1;
   }
+}
+
+/**
+ * True if `span` at `idx` is a component of a larger identifier rather than a
+ * standalone word. Expands outward over word + separator chars and flags only
+ * clearly-functional forms:
+ *  - paths / URLs (contain "/")
+ *  - extension / domain components ("composio.ts", "example.com") — a trailing
+ *    sentence period ("Nimits.") is NOT flagged, so real names survive
+ *  - all-lowercase kebab identifiers ("nimits-jarvis", "claude-agent-sdk")
+ * Mixed-case hyphenated proper names ("Nitesh-Singh") are NOT flagged and
+ * remain detectable.
+ */
+function isIdentifierFragment(
+  text: string,
+  span: string,
+  idx: number,
+): boolean {
+  const SEP = /[a-zA-Z0-9_./-]/;
+  let start = idx;
+  let end = idx + span.length;
+  while (start > 0 && SEP.test(text.charAt(start - 1))) start--;
+  while (end < text.length && SEP.test(text.charAt(end))) end++;
+  const expanded = text.slice(start, end);
+  if (expanded === span) return false;
+  // Paths / URLs always contain a slash.
+  if (expanded.includes("/")) return true;
+  // A dot followed by a letter-run = extension or domain component
+  // (composio.ts, example.com). A trailing period after a name is NOT one.
+  if (/\.[a-zA-Z]{1,10}(?:[.][a-zA-Z]{2,4})?/.test(expanded)) return true;
+  // All-lowercase kebab identifiers. Mixed-case hyphenated proper names
+  // (Nitesh-Singh) are intentionally NOT flagged.
+  if (expanded.includes("-") && !/[A-Z]/.test(expanded)) return true;
+  return false;
 }
 
 /**
@@ -269,6 +311,10 @@ function isLikelyMachineString(text: string): boolean {
   if (/^[A-Z]{2,}$/.test(trimmed)) return true;
   // camelCase code identifiers: geocodingDirect, countryCode, maxResults
   if (/^[a-z]+(?:[A-Z][a-z0-9]+)+$/.test(trimmed)) return true;
+  // Lowercase kebab / dotted identifiers: nimits-jarvis, composio.ts,
+  // claude-4.5-sonnet, @composio/claude-agent-sdk (model IDs, package names,
+  // file names). DeBERTa frequently misclassifies their segments as names.
+  if (/^[a-z0-9]+(?:[-.][a-z0-9]+)+$/.test(trimmed)) return true;
   return false;
 }
 
@@ -321,8 +367,9 @@ export async function classifyPII(
       const spanValue = reconstructSpan(group.words);
       if (!spanValue || spanValue.length < 2) continue;
 
-      // Skip already-tokenized values or machine identifiers (tool slugs, param names)
-      if (isTokenString(spanValue) || isLikelyMachineString(spanValue)) continue;
+      // Skip already-tokenized values (incl. nested/unbracketed tokens) or
+      // machine identifiers (tool slugs, param names)
+      if (containsTokenPattern(spanValue) || isLikelyMachineString(spanValue)) continue;
 
       // Skip protected terms (agent/product names, functional IDs) — never redact
       if (isProtectedTerm(spanValue)) continue;

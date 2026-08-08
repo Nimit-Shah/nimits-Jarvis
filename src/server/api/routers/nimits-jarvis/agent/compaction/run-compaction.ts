@@ -16,7 +16,7 @@ import {
 import { sanitizeString } from "../context/build-context";
 import { getModelProvider, buildLLM, llmTimeoutFor } from "../model-utils";
 import { computeSummarizationBudget } from "../context/context-window";
-import { PIIVault } from "../pii";
+import { PIIVault, stripResidualTokens } from "../pii";
 
 interface CompactionParams {
   chatId: string;
@@ -116,8 +116,13 @@ async function summarize(
       abortSignal: controller.signal,
     });
 
-    // Restore PII in the summary before persisting to the database
-    return vault ? vault.restore(result.text) : result.text;
+    // Restore PII in the summary before persisting to the database.
+    // Strip any residual (orphan) token restore() cannot resolve so the
+    // durable summary never stores a raw placeholder that would re-leak on
+    // replay into the next turn's context.
+    return vault
+      ? stripResidualTokens(vault.restore(result.text))
+      : stripResidualTokens(result.text);
   } finally {
     clearTimeout(timeout);
   }
@@ -168,7 +173,9 @@ async function stagedSummarize(
       abortSignal: mergeController.signal,
     });
 
-    return mergeVault ? mergeVault.restore(mergeResult.text) : mergeResult.text;
+    return mergeVault
+      ? stripResidualTokens(mergeVault.restore(mergeResult.text))
+      : stripResidualTokens(mergeResult.text);
   } finally {
     clearTimeout(mergeTimeout);
   }
@@ -349,6 +356,14 @@ export async function runCompaction(
   if (failuresSuffix) {
     summary += failuresSuffix;
   }
+
+  // Final belt-and-braces guard before the summary enters the durable store:
+  // regardless of which path produced it (LLM summarize, staged merge, or the
+  // keepLastTextFallback that copies raw DB messages verbatim), any residual
+  // (orphan) token is stripped so composio_claw_chat.lastCompactionSummary can
+  // never persist a raw placeholder. Replaying it into the next turn's context
+  // would otherwise re-echo an unresolvable token.
+  summary = stripResidualTokens(summary);
 
   const estimatedTokens = Math.ceil(summary.length / 4);
 

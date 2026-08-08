@@ -33,6 +33,15 @@ const DEFAULT_PROTECTED_TERMS = [
   // Product / project names
   "trustclaw",
   "project aurora",
+  // Agent platform / model vendors — these are product names the user's agent
+  // legitimately references in prompts, tool calls, and packages. DeBERTa
+  // frequently misclassifies them as person names.
+  "composio",
+  "claude",
+  "gpt",
+  "openai",
+  "anthropic",
+  "openrouter",
 ];
 
 /**

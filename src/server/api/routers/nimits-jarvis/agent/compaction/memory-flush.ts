@@ -1,11 +1,11 @@
-import { generateText, stepCountIs } from "ai";
+import { generateText, stepCountIs, type Tool } from "ai";
 import { db } from "~/server/clients/db";
 import { createCustomTools } from "../tools";
 import { serializeMessages } from "./prompts";
 import type { ReconstructedMessage } from "../types";
 import { getModelProvider, buildLLM, llmTimeoutFor } from "../model-utils";
 import { computeSummarizationBudget } from "../context/context-window";
-import { PIIVault } from "../pii";
+import { PIIVault, deepStripResidualTokens, stripResidualTokens } from "../pii";
 
 const FLUSH_SYSTEM_PROMPT =
   "Pre-compaction memory flush turn. " +
@@ -19,6 +19,35 @@ const FLUSH_USER_PROMPT =
   "Store durable memories now using memory_save. " +
   "Focus on: user preferences, key decisions, task progress, important context. " +
   "If nothing to store, reply with <silent/>.";
+
+/**
+ * Restores any PII tokens in a tool's input back to real values before the
+ * tool runs. The flush turn's memory_save / memory_search tools are passed to
+ * generateText() DIRECTLY — unlike the main agent's tools, they do NOT go
+ * through wrapToolExecutors(). Without this restore, a `[CLAW_*]` token the
+ * flush LLM saw in the redacted context would be persisted to memory verbatim
+ * (memory_save) or queried verbatim (memory_search). Those tokens are per-request
+ * and their mapping is never persisted, so restoring now is the only chance to
+ * keep the durable store at real values.
+ */
+function wrapFlushTool<I, O>(tool: Tool<I, O>, vault: PIIVault | null): Tool<I, O> {
+  const originalExecute = tool.execute;
+  if (!originalExecute) return tool;
+  const wrapped = {
+    ...tool,
+    execute: async (...args: Parameters<typeof originalExecute>): Promise<O> => {
+      const [input] = args;
+      // After restore, deep-strip any residual (orphan) token the vault could
+      // not resolve so it is never persisted by memory_save / Mnemosyne.
+      const restoredInput = deepStripResidualTokens(
+        vault ? vault.restoreDeep(input) : input,
+      ) as I;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+      return originalExecute(restoredInput, ...(args.slice(1) as [any])) as Promise<O>;
+    },
+  };
+  return wrapped as unknown as Tool<I, O>;
+}
 
 interface MemoryFlushParams {
   chatId: string;
@@ -43,10 +72,22 @@ export async function runMemoryFlush(
     const isOllama = provider === "ollama";
     const model = buildLLM(anthropicModel);
 
+    // Redact PII before sending to external LLMs. If the main agent's
+    // PIIVault was passed in, reuse its registrations (which include
+    // structured-extraction PII from tool results). Otherwise create a
+    // fresh vault which only does regex scanning. Declared before the tools
+    // so wrapFlushTool can restore their inputs with it.
+    const vault =
+      !isOllama
+        ? piiVault ?? new PIIVault()
+        : null;
+
     const allCustomTools = createCustomTools(instanceId);
+    // Wrap both memory tools so any PII token in their inputs is restored to a
+    // real value before persistence/query (see wrapFlushTool above).
     const memoryTools = {
-      memory_save: allCustomTools.memory_save,
-      memory_search: allCustomTools.memory_search,
+      memory_save: wrapFlushTool(allCustomTools.memory_save, vault),
+      memory_search: wrapFlushTool(allCustomTools.memory_search, vault),
     };
 
     const contextSummary = serializeMessages(messages);
@@ -56,14 +97,6 @@ export async function runMemoryFlush(
         ? `... [earlier context omitted] ...\n${contextSummary.slice(-budget)}`
         : contextSummary;
 
-    // Redact PII before sending to external LLMs. If the main agent's
-    // PIIVault was passed in, reuse its registrations (which include
-    // structured-extraction PII from tool results). Otherwise create a
-    // fresh vault which only does regex scanning.
-    const vault =
-      !isOllama
-        ? piiVault ?? new PIIVault()
-        : null;
     const safeContext = vault ? await vault.redact(cappedContext) : cappedContext;
 
     const flushPrompt = `Here is the recent conversation context:\n\n${safeContext}\n\n${FLUSH_USER_PROMPT}`;
@@ -94,6 +127,16 @@ export async function runMemoryFlush(
         }
       }
     }
+
+    // Restore PII tokens in the flush assistant text before persisting so the
+    // transcript stores real values. The flush LLM saw a redacted context and
+    // may have echoed `[CLAW_*]` tokens into its reply; the same-request vault
+    // can still resolve them here, but once persisted they'd be unrecoverable.
+    // Strip any residual (orphan) token restore() cannot resolve so the flush
+    // transcript never stores a raw placeholder that would re-leak.
+    const flushText = vault
+      ? stripResidualTokens(vault.restore(result.text || "<silent/>"))
+      : stripResidualTokens(result.text || "<silent/>");
 
     // Atomically claim this flush cycle AFTER the LLM call succeeds.
     // If the LLM fails, the counter stays unchanged and the next cycle
@@ -127,7 +170,7 @@ export async function runMemoryFlush(
           instanceId,
           chatId,
           role: "assistant",
-          content: [{ type: "text", text: result.text || "<silent/>" }],
+          content: [{ type: "text", text: flushText }],
           source: "web",
           messageType: "memory_flush",
         },

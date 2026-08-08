@@ -16,6 +16,7 @@
 
 export { PIIVault, containsTokenPattern, isTokenString } from "./pii-tokenizer";
 export { PIITransportShield } from "./pii-transport-shield";
+export { stripResidualTokens, deepStripResidualTokens } from "./brands";
 export { scanForPII, extractStructuredPII } from "./pii-scanner";
 export type {
   PIIType,
