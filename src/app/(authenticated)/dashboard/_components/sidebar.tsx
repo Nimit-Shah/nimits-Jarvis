@@ -26,9 +26,28 @@ import { useChatId } from "~/hooks/use-chat-id";
 import { ErrorDisplay } from "~/components/core/error-display";
 import { Input } from "~/components/ui/input";
 import { Button } from "~/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "~/components/ui/popover";
-import { Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle } from "~/components/ui/dialog";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "~/components/ui/alert-dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "~/components/ui/popover";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogFooter,
+  DialogTitle,
+} from "~/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "~/components/ui/alert-dialog";
 import { authClient } from "~/clients/auth/react";
 import { cn } from "~/lib/utils";
 import { useTheme } from "next-themes";
@@ -44,7 +63,10 @@ export function Sidebar() {
   const [chatId, setChatId] = useChatId();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [renameTarget, setRenameTarget] = useState<{ id: string; name: string } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [projectOpen, setProjectOpen] = useState(false);
   const [profileExpanded, setProfileExpanded] = useState(false);
@@ -52,10 +74,12 @@ export function Sidebar() {
   const utils = trpc.useUtils();
   const { resolvedTheme, setTheme } = useTheme();
 
-  const { data: chats, isLoading, error, refetch } = trpc.chats.list.useQuery(
-    { instanceId },
-    { staleTime: 30_000 },
-  );
+  const {
+    data: chats,
+    isLoading,
+    error,
+    refetch,
+  } = trpc.chats.list.useQuery({ instanceId }, { staleTime: 30_000 });
 
   const { data: instanceData } = trpc.nimitsJarvis.getInstance.useQuery(
     { instanceId },
@@ -109,13 +133,19 @@ export function Sidebar() {
   );
 
   const handleNewChat = useCallback(() => {
-    void createChat.mutateAsync({ instanceId });
-  }, [createChat, instanceId]);
+    // Pass the resolved instance id (URL param OR server-resolved default) so
+    // the new chat is created under the project the user is actually viewing —
+    // this is what picks up that project's default model.
+    void createChat.mutateAsync({ instanceId: activeInstanceId });
+  }, [createChat, activeInstanceId]);
 
   const handleRename = useCallback(
     (newName: string) => {
       if (renameTarget && newName.trim()) {
-        void renameChat.mutateAsync({ chatId: renameTarget.id, name: newName.trim() });
+        void renameChat.mutateAsync({
+          chatId: renameTarget.id,
+          name: newName.trim(),
+        });
       }
     },
     [renameTarget, renameChat],
@@ -132,30 +162,34 @@ export function Sidebar() {
       setProjectOpen(false);
       return;
     }
-    
+
     // Update instance ID in URL and localStorage
     const params = new URLSearchParams(searchParams.toString());
     params.set("instance", id);
     params.delete("chat");
-    
-    try { localStorage.setItem("nimits-jarvis-active-instance", id); } catch {}
-    
+
+    try {
+      localStorage.setItem("nimits-jarvis-active-instance", id);
+    } catch {}
+
     // Invalidate and refetch data for new instance
     void utils.nimitsJarvis.getInstance.invalidate();
     void utils.chats.list.invalidate();
-    
+
     // Fetch chats for the new project
     const newChats = await utils.chats.list.fetch({ instanceId: id });
-    
+
     // Navigate to the most recent chat if available
     if (newChats && newChats.length > 0) {
       const mostRecentChat = newChats[0];
       if (mostRecentChat) {
         params.set("chat", mostRecentChat.id);
-        try { localStorage.setItem("nimits-jarvis-active-chat", mostRecentChat.id); } catch {}
+        try {
+          localStorage.setItem("nimits-jarvis-active-chat", mostRecentChat.id);
+        } catch {}
       }
     }
-    
+
     router.push(`/dashboard?${params.toString()}`, { scroll: false });
     setProjectOpen(false);
   };
@@ -169,38 +203,43 @@ export function Sidebar() {
 
   return (
     <>
-      <div className={cn(
-        "flex flex-col h-full bg-card/50 border-r border-border/50 p-3 font-sans transition-all duration-300",
-        isCollapsed ? "w-[64px]" : "w-[260px]",
-      )}>
+      <div
+        className={cn(
+          "bg-card/50 border-border/50 flex h-full flex-col border-r p-3 font-sans transition-all duration-300",
+          isCollapsed ? "w-[64px]" : "w-[260px]",
+        )}
+      >
         {/* Header: Toggle + Project Selector */}
-        <div className="shrink-0 flex items-center gap-2 mb-4">
+        <div className="mb-4 flex shrink-0 items-center gap-2">
           <button
             onClick={() => setIsCollapsed(!isCollapsed)}
-            className="p-1.5 rounded-md text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5 hover:text-foreground transition-colors shrink-0"
+            className="text-muted-foreground hover:text-foreground shrink-0 rounded-md p-1.5 transition-colors hover:bg-black/5 dark:hover:bg-white/5"
           >
             {isCollapsed ? (
-              <PanelLeftOpen className="w-[18px] h-[18px]" strokeWidth={1.5} />
+              <PanelLeftOpen className="h-[18px] w-[18px]" strokeWidth={1.5} />
             ) : (
-              <PanelLeftClose className="w-[18px] h-[18px]" strokeWidth={1.5} />
+              <PanelLeftClose className="h-[18px] w-[18px]" strokeWidth={1.5} />
             )}
           </button>
 
           {!isCollapsed && (
             <Popover open={projectOpen} onOpenChange={setProjectOpen}>
               <PopoverTrigger asChild>
-                <button className="flex items-center justify-between flex-1 px-2 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors select-none group min-w-0">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-7 h-7 rounded-[6px] bg-primary text-primary-foreground flex items-center justify-center font-semibold text-[12px] shadow-sm shrink-0">
+                <button className="group flex min-w-0 flex-1 cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 transition-colors select-none hover:bg-black/5 dark:hover:bg-white/5">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <div className="bg-primary text-primary-foreground flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] text-[12px] font-semibold shadow-sm">
                       {activeInstanceName.charAt(0)}
                     </div>
-                    <div className="flex flex-col overflow-hidden min-w-0">
-                      <span className="text-[13px] font-medium leading-none mb-1 text-foreground truncate">
+                    <div className="flex min-w-0 flex-col overflow-hidden">
+                      <span className="text-foreground mb-1 truncate text-[13px] leading-none font-medium">
                         {activeInstanceName}
                       </span>
                     </div>
                   </div>
-                  <ChevronDown className="w-3.5 h-3.5 text-muted-foreground/50 group-hover:text-foreground/70 transition-colors shrink-0" strokeWidth={1.5} />
+                  <ChevronDown
+                    className="text-muted-foreground/50 group-hover:text-foreground/70 h-3.5 w-3.5 shrink-0 transition-colors"
+                    strokeWidth={1.5}
+                  />
                 </button>
               </PopoverTrigger>
               <PopoverContent className="w-56 p-1" align="start" side="bottom">
@@ -210,12 +249,15 @@ export function Sidebar() {
                       key={inst.id}
                       onClick={() => handleProjectSwitch(inst.id)}
                       className={cn(
-                        "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-accent hover:text-accent-foreground",
-                        inst.id === activeInstanceId && "bg-accent text-accent-foreground font-medium",
+                        "hover:bg-accent hover:text-accent-foreground flex w-full items-center justify-between rounded-md px-2 py-1.5 text-xs transition-colors",
+                        inst.id === activeInstanceId &&
+                          "bg-accent text-accent-foreground font-medium",
                       )}
                     >
                       <span className="truncate">{inst.name}</span>
-                      {inst.id === activeInstanceId && <Check className="size-3 shrink-0" />}
+                      {inst.id === activeInstanceId && (
+                        <Check className="size-3 shrink-0" />
+                      )}
                     </button>
                   ))}
                 </div>
@@ -225,14 +267,14 @@ export function Sidebar() {
         </div>
 
         {/* New Chat Button */}
-        <div className="shrink-0 mb-2">
+        <div className="mb-2 shrink-0">
           <Button
             variant="outline"
             size="sm"
             onClick={handleNewChat}
             disabled={createChat.isPending}
             className={cn(
-              "w-full h-8 justify-start gap-2 text-xs",
+              "h-8 w-full justify-start gap-2 text-xs",
               isCollapsed && "justify-center px-0",
             )}
           >
@@ -242,18 +284,18 @@ export function Sidebar() {
         </div>
 
         {/* Navigation */}
-        <div className="shrink-0 space-y-0.5 mb-2">
+        <div className="mb-2 shrink-0 space-y-0.5">
           <button
             onClick={() => setIsSearchOpen(true)}
             className={cn(
-              "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5 hover:text-foreground transition-colors cursor-pointer",
+              "text-muted-foreground hover:text-foreground flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-black/5 dark:hover:bg-white/5",
               isCollapsed && "justify-center px-0",
             )}
           >
             <Search className="size-3.5" />
             {!isCollapsed && <span>Search</span>}
             {!isCollapsed && (
-              <kbd className="ml-auto hidden group-hover:inline-flex items-center justify-center h-5 px-1.5 text-[10px] font-medium font-mono text-muted-foreground/60 bg-background/50 border border-border/50 rounded-[4px] shadow-xs">
+              <kbd className="text-muted-foreground/60 bg-background/50 border-border/50 ml-auto hidden h-5 items-center justify-center rounded-[4px] border px-1.5 font-mono text-[10px] font-medium shadow-xs group-hover:inline-flex">
                 ⌘K
               </kbd>
             )}
@@ -261,10 +303,14 @@ export function Sidebar() {
 
           <Link href={`/dashboard/toolkits${instanceQs}`} className="block">
             <Button
-              variant={pathname.startsWith("/dashboard/toolkits") ? "secondary" : "ghost"}
+              variant={
+                pathname.startsWith("/dashboard/toolkits")
+                  ? "secondary"
+                  : "ghost"
+              }
               size="sm"
               className={cn(
-                "w-full h-8 justify-start gap-2 text-xs text-muted-foreground",
+                "text-muted-foreground h-8 w-full justify-start gap-2 text-xs",
                 isCollapsed && "justify-center px-0",
               )}
             >
@@ -275,10 +321,14 @@ export function Sidebar() {
 
           <Link href={`/dashboard/settings${instanceQs}`} className="block">
             <Button
-              variant={pathname.startsWith("/dashboard/settings") ? "secondary" : "ghost"}
+              variant={
+                pathname.startsWith("/dashboard/settings")
+                  ? "secondary"
+                  : "ghost"
+              }
               size="sm"
               className={cn(
-                "w-full h-8 justify-start gap-2 text-xs text-muted-foreground",
+                "text-muted-foreground h-8 w-full justify-start gap-2 text-xs",
                 isCollapsed && "justify-center px-0",
               )}
             >
@@ -289,29 +339,38 @@ export function Sidebar() {
         </div>
 
         {/* Separator */}
-        <div className="h-px bg-border/50 my-2" />
+        <div className="bg-border/50 my-2 h-px" />
 
         {/* Recent Chats - only when expanded */}
         {!isCollapsed && (
-          <div className="min-h-0 flex-1 overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-            <p className="px-2 py-1.5 text-[10px] font-semibold tracking-wider text-muted-foreground/50 uppercase">
+          <div className="min-h-0 flex-1 [scrollbar-width:none] overflow-y-auto [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+            <p className="text-muted-foreground/50 px-2 py-1.5 text-[10px] font-semibold tracking-wider uppercase">
               Recent
             </p>
 
             {isLoading && !chats ? (
               <div className="space-y-1 p-1">
                 {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="h-8 rounded-md bg-muted/50 animate-pulse" />
+                  <div
+                    key={i}
+                    className="bg-muted/50 h-8 animate-pulse rounded-md"
+                  />
                 ))}
               </div>
             ) : error ? (
               <div className="p-3">
-                <ErrorDisplay message="Failed to load chats" retryText="Retry" onRetry={() => void refetch()} />
+                <ErrorDisplay
+                  message="Failed to load chats"
+                  retryText="Retry"
+                  onRetry={() => void refetch()}
+                />
               </div>
             ) : !chats || chats.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1.5 p-6 text-center">
-                <MessageSquare className="size-6 text-muted-foreground/30" />
-                <p className="text-[12px] text-muted-foreground">No chats yet</p>
+                <MessageSquare className="text-muted-foreground/30 size-6" />
+                <p className="text-muted-foreground text-[12px]">
+                  No chats yet
+                </p>
               </div>
             ) : (
               <div className="flex flex-col gap-0.5">
@@ -330,30 +389,36 @@ export function Sidebar() {
                         }
                       }}
                       className={cn(
-                        "group flex w-full items-center gap-2 px-2 py-1.5 text-left transition-all duration-150 cursor-pointer rounded-md",
+                        "group flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-all duration-150",
                         isActive
-                          ? "bg-black/5 dark:bg-white/10 text-foreground font-medium"
-                          : "hover:bg-black/5 dark:hover:bg-white/5 text-muted-foreground hover:text-foreground",
+                          ? "text-foreground bg-black/5 font-medium dark:bg-white/10"
+                          : "text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5",
                       )}
                     >
                       <MessageSquare className="size-3 shrink-0 opacity-60" />
-                      <span className="min-w-0 flex-1 truncate text-[13px]">{chat.name}</span>
+                      <span className="min-w-0 flex-1 truncate text-[13px]">
+                        {chat.name}
+                      </span>
                       <Popover>
                         <PopoverTrigger asChild>
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="size-5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                            className="size-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
                             onClick={(e) => e.stopPropagation()}
                           >
                             <MoreHorizontal className="size-3" />
                           </Button>
                         </PopoverTrigger>
-                        <PopoverContent className="w-32 p-1" align="end" side="right">
+                        <PopoverContent
+                          className="w-32 p-1"
+                          align="end"
+                          side="right"
+                        >
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="w-full justify-start gap-2 h-7 text-[11px]"
+                            className="h-7 w-full justify-start gap-2 text-[11px]"
                             onClick={(e) => {
                               e.stopPropagation();
                               setRenameTarget({ id: chat.id, name: chat.name });
@@ -364,7 +429,7 @@ export function Sidebar() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="w-full justify-start gap-2 h-7 text-[11px] text-destructive hover:text-destructive"
+                            className="text-destructive hover:text-destructive h-7 w-full justify-start gap-2 text-[11px]"
                             onClick={(e) => {
                               e.stopPropagation();
                               setDeleteTarget(chat.id);
@@ -384,7 +449,7 @@ export function Sidebar() {
 
         {/* Collapsed chat icons */}
         {isCollapsed && (
-          <div className="min-h-0 flex-1 overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] flex flex-col items-center gap-1 py-2">
+          <div className="flex min-h-0 flex-1 [scrollbar-width:none] flex-col items-center gap-1 overflow-y-auto py-2 [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
             {chats?.slice(0, 8).map((chat) => {
               const isActive = chat.id === chatId;
               return (
@@ -392,10 +457,10 @@ export function Sidebar() {
                   key={chat.id}
                   onClick={() => navigateToChat(chat.id)}
                   className={cn(
-                    "w-8 h-8 rounded-md flex items-center justify-center transition-colors",
+                    "flex h-8 w-8 items-center justify-center rounded-md transition-colors",
                     isActive
-                      ? "bg-black/5 dark:bg-white/10 text-foreground"
-                      : "text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5 hover:text-foreground",
+                      ? "text-foreground bg-black/5 dark:bg-white/10"
+                      : "text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5",
                   )}
                   title={chat.name}
                 >
@@ -407,27 +472,31 @@ export function Sidebar() {
         )}
 
         {/* Separator */}
-        <div className="h-px bg-border/50 my-2" />
+        <div className="bg-border/50 my-2 h-px" />
 
         {/* Profile Section */}
         <div className="shrink-0">
           <Popover open={profileExpanded} onOpenChange={setProfileExpanded}>
             <PopoverTrigger asChild>
-              <button className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/5",
-                isCollapsed && "justify-center px-0",
-              )}>
-                <div className="size-7 rounded-full bg-muted flex items-center justify-center shrink-0">
-                  <User className="size-3.5 text-muted-foreground" />
+              <button
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/5",
+                  isCollapsed && "justify-center px-0",
+                )}
+              >
+                <div className="bg-muted flex size-7 shrink-0 items-center justify-center rounded-full">
+                  <User className="text-muted-foreground size-3.5" />
                 </div>
                 {!isCollapsed && (
                   <>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-[12px] font-medium text-foreground">{activeInstanceName}</p>
+                      <p className="text-foreground truncate text-[12px] font-medium">
+                        {activeInstanceName}
+                      </p>
                     </div>
                     <ChevronDown
                       className={cn(
-                        "size-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
+                        "text-muted-foreground size-3.5 shrink-0 transition-transform duration-200",
                         profileExpanded && "rotate-180",
                       )}
                     />
@@ -441,9 +510,13 @@ export function Sidebar() {
                   setTheme(resolvedTheme === "dark" ? "light" : "dark");
                   setProfileExpanded(false);
                 }}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] transition-colors hover:bg-accent hover:text-accent-foreground"
+                className="hover:bg-accent hover:text-accent-foreground flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] transition-colors"
               >
-                {resolvedTheme === "dark" ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
+                {resolvedTheme === "dark" ? (
+                  <Sun className="size-3.5" />
+                ) : (
+                  <Moon className="size-3.5" />
+                )}
                 {resolvedTheme === "dark" ? "Light Mode" : "Dark Mode"}
               </button>
               <button
@@ -451,7 +524,7 @@ export function Sidebar() {
                   void handleLogout();
                   setProfileExpanded(false);
                 }}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive"
+                className="text-destructive hover:bg-destructive/10 hover:text-destructive flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] transition-colors"
               >
                 <LogOut className="size-3.5" /> Logout
               </button>
@@ -469,7 +542,10 @@ export function Sidebar() {
       />
 
       {/* Rename Dialog */}
-      <Dialog open={!!renameTarget} onOpenChange={(open) => !open && setRenameTarget(null)}>
+      <Dialog
+        open={!!renameTarget}
+        onOpenChange={(open) => !open && setRenameTarget(null)}
+      >
         <DialogContent className="sm:max-w-xs">
           <DialogHeader>
             <DialogTitle className="text-sm">Rename Chat</DialogTitle>
@@ -477,7 +553,9 @@ export function Sidebar() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              const input = (e.target as HTMLFormElement).querySelector("input");
+              const input = (e.target as HTMLFormElement).querySelector(
+                "input",
+              );
               if (input) handleRename(input.value);
             }}
           >
@@ -488,7 +566,12 @@ export function Sidebar() {
               className="mt-2 text-sm"
             />
             <DialogFooter className="mt-4">
-              <Button type="button" variant="outline" size="sm" onClick={() => setRenameTarget(null)}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setRenameTarget(null)}
+              >
                 Cancel
               </Button>
               <Button type="submit" size="sm" disabled={renameChat.isPending}>
@@ -500,7 +583,10 @@ export function Sidebar() {
       </Dialog>
 
       {/* Delete Confirmation */}
-      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+      <AlertDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      >
         <AlertDialogContent className="sm:max-w-xs">
           <AlertDialogHeader>
             <AlertDialogTitle className="text-sm">Delete Chat</AlertDialogTitle>
@@ -509,7 +595,9 @@ export function Sidebar() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="text-[12px]">Cancel</AlertDialogCancel>
+            <AlertDialogCancel className="text-[12px]">
+              Cancel
+            </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDelete}
               disabled={deleteChatMut.isPending}

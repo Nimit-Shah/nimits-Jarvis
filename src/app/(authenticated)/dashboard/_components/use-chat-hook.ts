@@ -8,7 +8,11 @@ import { trpc } from "~/clients/trpc";
 import { useInstanceId } from "~/hooks/use-instance-id";
 import { showErrorToast } from "~/components/core/toast-notifications";
 
-export function useChatHook({ initialMessages, streamId, chatId }: {
+export function useChatHook({
+  initialMessages,
+  streamId,
+  chatId,
+}: {
   initialMessages: UIMessage[];
   streamId: string | null;
   chatId: string;
@@ -27,7 +31,8 @@ export function useChatHook({ initialMessages, streamId, chatId }: {
           messages: messages.map((msg) => {
             const textParts = (msg.parts ?? []).filter(
               (p): p is { type: "text"; text: string } =>
-                p.type === "text" && typeof (p as { text?: string }).text === "string",
+                p.type === "text" &&
+                typeof (p as { text?: string }).text === "string",
             );
             return {
               ...msg,
@@ -42,7 +47,9 @@ export function useChatHook({ initialMessages, streamId, chatId }: {
           }),
           instanceId,
           chatId,
-          isVoice: (requestMetadata as { isVoice?: boolean } | undefined)?.isVoice ?? false,
+          isVoice:
+            (requestMetadata as { isVoice?: boolean } | undefined)?.isVoice ??
+            false,
         },
       }),
       prepareReconnectToStreamRequest: () => ({
@@ -57,17 +64,47 @@ export function useChatHook({ initialMessages, streamId, chatId }: {
     resume: streamId !== null,
     onFinish: () => {
       void utils.nimitsJarvis.getHistory.invalidate();
+      void utils.chats.list.invalidate();
     },
     onError: (error) => {
       void utils.nimitsJarvis.getHistory.invalidate();
+      void utils.chats.list.invalidate();
       const msg = error.message || "An error occurred";
       if (msg.includes("image") || msg.includes("Cannot read")) {
-        showErrorToast("Image input is not supported. Please remove any attached images and try again.");
+        showErrorToast(
+          "Image input is not supported. Please remove any attached images and try again.",
+        );
       } else {
         showErrorToast(msg);
       }
     },
   });
+
+  // Stable per-message creation timestamps for live/streamed messages. History
+  // messages carry createdAt in metadata from getHistory; anything else (a
+  // freshly sent user message, an in-flight assistant reply) gets stamped once
+  // on first appearance so hover timestamps are stable across re-renders.
+  const liveTimestampsRef = useRef<Map<string, number>>(new Map());
+
+  const stampedMessages = useMemo(() => {
+    return chat.messages.map((msg) => {
+      const existing = (msg.metadata as { createdAt?: string } | undefined)
+        ?.createdAt;
+      if (existing) {
+        return msg;
+      }
+      const now = Date.now();
+      const stampedAt = liveTimestampsRef.current.get(msg.id) ?? now;
+      liveTimestampsRef.current.set(msg.id, stampedAt);
+      return {
+        ...msg,
+        metadata: {
+          ...(msg.metadata as object | undefined),
+          createdAt: new Date(stampedAt).toISOString(),
+        },
+      };
+    });
+  }, [chat.messages]);
 
   // Seed initial messages once on mount. Never pass `messages` as a controlled
   // prop to useChat - it resets internal state on every render, which causes a
@@ -108,7 +145,7 @@ export function useChatHook({ initialMessages, streamId, chatId }: {
     sendVoiceMessage,
     stop: stableStop,
     // Return initialMessages until seeded to avoid flash of empty state
-    messages: isSeeded ? chat.messages : initialMessages,
+    messages: isSeeded ? stampedMessages : initialMessages,
     status: chat.status,
     error: chat.error,
     setMessages: chat.setMessages,

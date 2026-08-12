@@ -9,37 +9,6 @@ import { ChatView } from "./chat-view";
 import { NimitsJarvisChatSkeleton } from "./nimits-jarvis-chat.skeleton";
 
 function ChatWithProvider({ chatId }: { chatId: string }) {
-  const [instanceId] = useInstanceId();
-  const utils = trpc.useUtils();
-  const { data: chats } = trpc.chats.list.useQuery(
-    { instanceId },
-  );
-  const renameChat = trpc.chats.rename.useMutation({
-    onSuccess: () => {
-      void utils.chats.list.invalidate();
-    },
-  });
-
-  const autoNamedRef = useRef(false);
-  const chat = chats?.find((c) => c.id === chatId);
-
-  useEffect(() => {
-    if (autoNamedRef.current || !chat || chat.name !== "New Chat") return;
-
-    autoNamedRef.current = true;
-    const timer = setTimeout(() => {
-      const firstUserMsg = document.querySelector('[data-role="user"]');
-      if (firstUserMsg) {
-        const text = firstUserMsg.textContent ?? "";
-        const name = text.length > 40 ? text.slice(0, 40) + "..." : text;
-        if (name.trim() && name.trim() !== "New Chat") {
-          void renameChat.mutateAsync({ chatId, name });
-        }
-      }
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [chat, chatId, renameChat]);
-
   return (
     <ChatProvider chatId={chatId}>
       <ChatView />

@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Search, MessageSquare, X, Loader2 } from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import { cn } from "~/lib/utils";
+import { DEFAULT_TIMEZONE, formatDateTimeLocal } from "~/lib/timezone";
 
 interface SearchOverlayProps {
   isOpen: boolean;
@@ -40,10 +41,17 @@ export function SearchOverlay({
     { enabled: isOpen && query.length >= 2 },
   );
 
+  const { data: instanceData } = trpc.nimitsJarvis.getInstance.useQuery(
+    { instanceId },
+    { enabled: isOpen },
+  );
+  const userTimezone = instanceData?.timezone ?? DEFAULT_TIMEZONE;
+
   // Filter chats by name for quick access
-  const filteredChats = chatList?.filter((chat) =>
-    chat.name.toLowerCase().includes(query.toLowerCase()),
-  ) ?? [];
+  const filteredChats =
+    chatList?.filter((chat) =>
+      chat.name.toLowerCase().includes(query.toLowerCase()),
+    ) ?? [];
 
   // Combine results: chat name matches + content matches
   const combinedResults: Array<{
@@ -127,45 +135,54 @@ export function SearchOverlay({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-background/40 backdrop-blur-sm px-4">
+    <div className="bg-background/40 fixed inset-0 z-50 flex items-start justify-center px-4 pt-[15vh] backdrop-blur-sm">
       <div className="absolute inset-0" onClick={onClose} />
-      <div className="relative w-full max-w-xl bg-card border border-border/50 rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+      <div className="bg-card border-border/50 animate-in fade-in zoom-in-95 relative w-full max-w-xl overflow-hidden rounded-xl border shadow-2xl duration-200">
         {/* Search Input */}
-        <div className="flex items-center px-4 border-b border-border/50">
-          <Search className="w-[18px] h-[18px] text-muted-foreground/70 mr-3 shrink-0" strokeWidth={1.5} />
+        <div className="border-border/50 flex items-center border-b px-4">
+          <Search
+            className="text-muted-foreground/70 mr-3 h-[18px] w-[18px] shrink-0"
+            strokeWidth={1.5}
+          />
           <input
             ref={inputRef}
             autoFocus
-            className="flex-1 bg-transparent py-4 outline-none text-[14px] text-foreground placeholder:text-muted-foreground/50"
+            className="text-foreground placeholder:text-muted-foreground/50 flex-1 bg-transparent py-4 text-[14px] outline-none"
             placeholder="Search chats and messages..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
           />
           {isLoading && (
-            <Loader2 className="w-4 h-4 text-muted-foreground animate-spin mr-2" />
+            <Loader2 className="text-muted-foreground mr-2 h-4 w-4 animate-spin" />
           )}
           <button
             onClick={onClose}
-            className="ml-2 p-1 rounded-md text-muted-foreground/70 hover:bg-black/5 dark:hover:bg-white/10 hover:text-foreground transition-colors"
+            className="text-muted-foreground/70 hover:text-foreground ml-2 rounded-md p-1 transition-colors hover:bg-black/5 dark:hover:bg-white/10"
           >
-            <X className="w-[18px] h-[18px]" strokeWidth={1.5} />
+            <X className="h-[18px] w-[18px]" strokeWidth={1.5} />
           </button>
         </div>
 
         {/* Results */}
         <div ref={resultsRef} className="max-h-[400px] overflow-y-auto p-2">
           {query.length < 2 ? (
-            <div className="py-8 flex flex-col items-center justify-center">
-              <Search className="w-6 h-6 text-muted-foreground/30 mb-2" strokeWidth={1.5} />
-              <p className="text-[13px] text-muted-foreground font-medium">
+            <div className="flex flex-col items-center justify-center py-8">
+              <Search
+                className="text-muted-foreground/30 mb-2 h-6 w-6"
+                strokeWidth={1.5}
+              />
+              <p className="text-muted-foreground text-[13px] font-medium">
                 Type to search chats and messages...
               </p>
             </div>
           ) : combinedResults.length === 0 && !isLoading ? (
-            <div className="py-8 flex flex-col items-center justify-center">
-              <MessageSquare className="w-6 h-6 text-muted-foreground/30 mb-2" strokeWidth={1.5} />
-              <p className="text-[13px] text-muted-foreground font-medium">
+            <div className="flex flex-col items-center justify-center py-8">
+              <MessageSquare
+                className="text-muted-foreground/30 mb-2 h-6 w-6"
+                strokeWidth={1.5}
+              />
+              <p className="text-muted-foreground text-[13px] font-medium">
                 No results found
               </p>
             </div>
@@ -176,25 +193,28 @@ export function SearchOverlay({
                   key={`${result.chatId}-${result.type}-${index}`}
                   onClick={() => handleSelect(result.chatId)}
                   className={cn(
-                    "flex items-start gap-3 px-3 py-2.5 rounded-lg text-left transition-colors",
+                    "flex items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
                     index === selectedIndex
                       ? "bg-accent text-accent-foreground"
                       : "hover:bg-accent/50 text-foreground",
                   )}
                 >
-                  <MessageSquare className="w-4 h-4 mt-0.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+                  <MessageSquare
+                    className="text-muted-foreground mt-0.5 h-4 w-4 shrink-0"
+                    strokeWidth={1.5}
+                  />
                   <div className="min-w-0 flex-1">
-                    <p className="text-[13px] font-medium truncate">
+                    <p className="truncate text-[13px] font-medium">
                       {result.chatName}
                     </p>
                     {result.preview && (
-                      <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                      <p className="text-muted-foreground mt-0.5 truncate text-[11px]">
                         {result.preview}
                       </p>
                     )}
                     {result.type === "message" && result.timestamp && (
-                      <p className="text-[10px] text-muted-foreground/60 mt-1">
-                        {new Date(result.timestamp).toLocaleDateString()}
+                      <p className="text-muted-foreground/60 mt-1 text-[10px]">
+                        {formatDateTimeLocal(result.timestamp, userTimezone)}
                       </p>
                     )}
                   </div>
@@ -205,17 +225,23 @@ export function SearchOverlay({
         </div>
 
         {/* Footer hint */}
-        <div className="px-4 py-2 border-t border-border/50 flex items-center gap-4 text-[11px] text-muted-foreground/60">
+        <div className="border-border/50 text-muted-foreground/60 flex items-center gap-4 border-t px-4 py-2 text-[11px]">
           <span className="flex items-center gap-1">
-            <kbd className="px-1 py-0.5 bg-black/5 dark:bg-white/10 rounded text-[10px]">↑↓</kbd>
+            <kbd className="rounded bg-black/5 px-1 py-0.5 text-[10px] dark:bg-white/10">
+              ↑↓
+            </kbd>
             navigate
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="px-1 py-0.5 bg-black/5 dark:bg-white/10 rounded text-[10px]">↵</kbd>
+            <kbd className="rounded bg-black/5 px-1 py-0.5 text-[10px] dark:bg-white/10">
+              ↵
+            </kbd>
             select
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="px-1 py-0.5 bg-black/5 dark:bg-white/10 rounded text-[10px]">esc</kbd>
+            <kbd className="rounded bg-black/5 px-1 py-0.5 text-[10px] dark:bg-white/10">
+              esc
+            </kbd>
             close
           </span>
         </div>

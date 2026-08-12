@@ -33,7 +33,7 @@ model User {
   email           String
   emailVerified   Boolean                @default(false)
   image           String?
-  timezone        String                 @default("UTC")
+  timezone        String                 @default("Asia/Kolkata")
   username        String?                @unique
   displayUsername String?
   createdAt       DateTime               @default(now())
@@ -209,7 +209,7 @@ model CronJob {
   chatId     String?
   expression String
   prompt     String
-  timezone   String    @default("UTC")
+  timezone   String    @default("Asia/Kolkata")
   enabled    Boolean   @default(true)
   lastRunAt  DateTime?
   nextRunAt  DateTime?

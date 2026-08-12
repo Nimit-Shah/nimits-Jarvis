@@ -5,7 +5,12 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Copy, Check } from "lucide-react";
 import type { UIMessage } from "@ai-sdk/react";
-import type { ChatStatus, DynamicToolUIPart, ToolUIPart, ReasoningUIPart } from "ai";
+import type {
+  ChatStatus,
+  DynamicToolUIPart,
+  ToolUIPart,
+  ReasoningUIPart,
+} from "ai";
 import { isToolUIPart, isReasoningUIPart, getToolName } from "ai";
 import { ThinkingIndicator } from "./thinking-indicator";
 import { ToolCallsSection } from "~/components/ui/tool-calls-section";
@@ -14,10 +19,14 @@ import { CodeBlock } from "./code-block";
 import { TableBlock } from "./table-block";
 import { stripToolResultEchoes } from "~/server/api/routers/nimits-jarvis/agent/strip-tool-echoes";
 import { PROSE_CLASSES } from "./prose-classes";
+import { MessageTimestamp } from "../message-timestamp";
+import { useChatContext } from "../../chat-context";
 
 type TextUIPart = { type: "text"; text: string };
 
-function mapToToolCallEntry(part: DynamicToolUIPart | ToolUIPart): ToolCallEntry {
+function mapToToolCallEntry(
+  part: DynamicToolUIPart | ToolUIPart,
+): ToolCallEntry {
   const rawName = getToolName(part);
   const displayName = rawName.replace(/^(COMPOSIO_|RUBE_)/, "");
   const category = displayName.split("_")[0]?.toLowerCase() ?? "general";
@@ -87,12 +96,12 @@ interface AssistantMessageProps {
   status: ChatStatus;
 }
 
-export function AssistantMessage({
-  message,
-  status,
-}: AssistantMessageProps) {
+export function AssistantMessage({ message, status }: AssistantMessageProps) {
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
+  const { timezone } = useChatContext();
+  const createdAt = (message.metadata as { createdAt?: string } | undefined)
+    ?.createdAt;
 
   useEffect(() => {
     return () => {
@@ -104,11 +113,15 @@ export function AssistantMessage({
 
   // Extract tool calls and reasoning in order
   const toolCalls = segments
-    .filter((s): s is Extract<MessageSegment, { kind: "tool-call" }> => s.kind === "tool-call")
+    .filter(
+      (s): s is Extract<MessageSegment, { kind: "tool-call" }> =>
+        s.kind === "tool-call",
+    )
     .map((s) => s.part);
 
   const reasoningSegments = segments.filter(
-    (s): s is Extract<MessageSegment, { kind: "reasoning" }> => s.kind === "reasoning",
+    (s): s is Extract<MessageSegment, { kind: "reasoning" }> =>
+      s.kind === "reasoning",
   );
 
   const textSegments = segments.filter(
@@ -119,15 +132,20 @@ export function AssistantMessage({
 
   // Build ordered chain of reasoning + tool calls for hierarchy display
   const reasoningTexts = reasoningSegments.map((s) => s.part.text);
-  
+
   // Create interleaved items for proper ordering
-  type ChainItem = 
+  type ChainItem =
     | { type: "reasoning"; text: string }
     | { type: "tool-call"; entry: ToolCallEntry };
-  
+
   const chainItems: ChainItem[] = segments
-    .filter((s): s is Extract<MessageSegment, { kind: "reasoning" }> | Extract<MessageSegment, { kind: "tool-call" }> => 
-      s.kind === "reasoning" || s.kind === "tool-call"
+    .filter(
+      (
+        s,
+      ): s is
+        | Extract<MessageSegment, { kind: "reasoning" }>
+        | Extract<MessageSegment, { kind: "tool-call" }> =>
+        s.kind === "reasoning" || s.kind === "tool-call",
     )
     .map((s) => {
       if (s.kind === "reasoning") {
@@ -168,7 +186,7 @@ export function AssistantMessage({
   }
 
   return (
-    <div className="space-y-4">
+    <div className="group space-y-4">
       {/* Chain of thought: reasoning + tool calls — above text */}
       {(reasoningTexts.length > 0 || toolCalls.length > 0) && (
         <ToolCallsSection
@@ -206,16 +224,25 @@ export function AssistantMessage({
 
       {/* Copy button */}
       {hasTextContent && (
-        <button
-          onClick={handleCopy}
-          className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-        >
-          {copied ? (
-            <Check className="size-3" />
-          ) : (
-            <Copy className="size-3" />
+        <div className="flex items-center gap-2">
+          {createdAt && (
+            <MessageTimestamp
+              createdAt={createdAt}
+              timezone={timezone}
+              className="opacity-0 group-hover:opacity-100"
+            />
           )}
-        </button>
+          <button
+            onClick={handleCopy}
+            className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+          >
+            {copied ? (
+              <Check className="size-3" />
+            ) : (
+              <Copy className="size-3" />
+            )}
+          </button>
+        </div>
       )}
     </div>
   );

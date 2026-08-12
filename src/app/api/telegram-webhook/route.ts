@@ -7,7 +7,11 @@ import { rateLimit } from "~/server/clients/rate-limit";
 import { prepareAgentRun } from "~/server/api/routers/nimits-jarvis/agent/setup";
 import { stripToolResultEchoes } from "~/server/api/routers/nimits-jarvis/agent/strip-tool-echoes";
 import { toPlainRecordSafe } from "~/server/api/routers/nimits-jarvis/agent/context/build-context";
-import { toHuman, toHumanDeep, toModel } from "~/server/api/routers/nimits-jarvis/agent/pii/brands";
+import {
+  toHuman,
+  toHumanDeep,
+  toModel,
+} from "~/server/api/routers/nimits-jarvis/agent/pii/brands";
 import { parseManageConnectionsResult } from "~/app/(authenticated)/dashboard/_components/tool-results/connections/schema";
 import {
   claimTelegramUpdate,
@@ -181,12 +185,13 @@ async function handleRegularMessage(
 
   await sendChatAction(chatId, "typing");
 
-  // Auto-create a new chat for each Telegram message
-  const chatName = text.length > 40 ? text.slice(0, 40) + "..." : text;
+  // Auto-create a new chat for each Telegram message. The heading is derived
+  // server-side by prepareAgentRun from the user prompt (shared code path with
+  // web + cron), so no name is set here — the DB default "New Chat" is treated
+  // as a placeholder and replaced with the derived heading.
   const newChat = await db.chat.create({
     data: {
       instanceId: instance.id,
-      name: chatName,
       model: instance.anthropicModel,
     },
     select: { id: true },
@@ -222,7 +227,10 @@ async function handleRegularMessage(
           const tr = step.toolResults[i];
           // Restore PII tokens in tool call input before describing to the human
           const tcInput = piiVault
-            ? (toHumanDeep(piiVault, toPlainRecordSafe(tc.input)) as Record<string, unknown>)
+            ? (toHumanDeep(piiVault, toPlainRecordSafe(tc.input)) as Record<
+                string,
+                unknown
+              >)
             : toPlainRecordSafe(tc.input);
           const desc = describeToolCall({
             toolName: tc.toolName,

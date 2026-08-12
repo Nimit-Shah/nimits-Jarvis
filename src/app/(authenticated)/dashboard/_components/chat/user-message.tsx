@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect } from "react";
 import { Copy, Check } from "lucide-react";
 import type { UIMessage } from "@ai-sdk/react";
+import { MessageTimestamp } from "./message-timestamp";
+import { useChatContext } from "../chat-context";
 
 interface UserMessageProps {
   message: UIMessage;
@@ -11,6 +13,9 @@ interface UserMessageProps {
 export function UserMessage({ message }: UserMessageProps) {
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
+  const { timezone } = useChatContext();
+  const createdAt = (message.metadata as { createdAt?: string } | undefined)
+    ?.createdAt;
 
   useEffect(() => {
     return () => {
@@ -33,25 +38,36 @@ export function UserMessage({ message }: UserMessageProps) {
   const paragraphs = textContent.split(/\n\n+/).filter(Boolean);
 
   return (
-    <div className="flex flex-col items-end">
+    <div className="group flex flex-col items-end">
       <div className="relative max-w-[80%]">
-        <div className="rounded-2xl bg-muted px-3 py-2 text-[12px] text-foreground space-y-1">
+        <div className="bg-muted text-foreground space-y-1 rounded-2xl px-3 py-2 text-[12px]">
           {paragraphs.map((p, i) => (
-            <p key={i} className="whitespace-pre-wrap leading-relaxed">{p}</p>
+            <p key={i} className="leading-relaxed whitespace-pre-wrap">
+              {p}
+            </p>
           ))}
         </div>
       </div>
 
-      <button
-        onClick={handleCopy}
-        className="mt-1 mr-1 text-muted-foreground/50 transition-colors hover:text-muted-foreground"
-      >
-        {copied ? (
-          <Check className="size-3.5" />
-        ) : (
-          <Copy className="size-3.5" />
+      <div className="mt-1 mr-1 flex items-center gap-2">
+        {createdAt && (
+          <MessageTimestamp
+            createdAt={createdAt}
+            timezone={timezone}
+            className="opacity-0 group-hover:opacity-100"
+          />
         )}
-      </button>
+        <button
+          onClick={handleCopy}
+          className="text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+        >
+          {copied ? (
+            <Check className="size-3.5" />
+          ) : (
+            <Copy className="size-3.5" />
+          )}
+        </button>
+      </div>
     </div>
   );
 }

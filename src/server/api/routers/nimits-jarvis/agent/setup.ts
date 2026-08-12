@@ -5,6 +5,8 @@ import { db } from "~/server/clients/db";
 import { getOrCreateSessionAndTools } from "~/server/clients/composio";
 import { decrypt } from "~/lib/crypto";
 import { buildSystemPrompt } from "./system-prompt";
+import { isPlaceholderChatName, deriveChatName } from "./chat-name";
+import { DEFAULT_TIMEZONE } from "~/lib/timezone";
 import { ollamaProvider } from "~/server/clients/ollama";
 import {
   createCustomTools,
@@ -64,63 +66,66 @@ function wrapToolExecutors(
     wrapped[name] = {
       ...tool,
       execute: async (...args: Parameters<typeof originalExecute>) => {
-          // Step 1: Restore PII tokens in tool inputs before sending
-          // to Composio. The LLM generated tool args may contain PII tokens
-          // like [CLAW_EMAIL_A1B2] that need to be restored to real values.
-          // After restore, deep-strip any residual (orphan) token the vault
-          // could not resolve — otherwise it would be persisted verbatim by
-          // durable tools (memory_save, Mnemosyne) and re-leak forever.
-          const [input] = args;
-          // The AI SDK passes a toolCallId inside the execution options (args[1]).
-          const options = args[1] as { toolCallId?: string } | undefined;
-          const tid = options?.toolCallId;
+        // Step 1: Restore PII tokens in tool inputs before sending
+        // to Composio. The LLM generated tool args may contain PII tokens
+        // like [CLAW_EMAIL_A1B2] that need to be restored to real values.
+        // After restore, deep-strip any residual (orphan) token the vault
+        // could not resolve — otherwise it would be persisted verbatim by
+        // durable tools (memory_save, Mnemosyne) and re-leak forever.
+        const [input] = args;
+        // The AI SDK passes a toolCallId inside the execution options (args[1]).
+        const options = args[1] as { toolCallId?: string } | undefined;
+        const tid = options?.toolCallId;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+        const restoredInput = deepStripResidualTokens(
+          vault ? vault.restoreDeep(input) : input,
+        );
+        // Cache the restored (real) input ONCE so DB persistence + any UI
+        // re-render reads the exact same value the third-party tool saw.
+        if (vault && tid) {
+          restoreCache.set(tid, restoredInput);
+        }
+
+        // Step 2: Call the actual tool with restored (real) values
+        let result;
+        try {
           // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-          const restoredInput = deepStripResidualTokens(
-            vault ? vault.restoreDeep(input) : input,
+          result = await originalExecute(
+            restoredInput,
+            ...(args.slice(1) as [any]),
           );
-          // Cache the restored (real) input ONCE so DB persistence + any UI
-          // re-render reads the exact same value the third-party tool saw.
-          if (vault && tid) {
-            restoreCache.set(tid, restoredInput);
-          }
-
-          // Step 2: Call the actual tool with restored (real) values
-          let result;
-          try {
+        } catch (error) {
+          // Step 3: Sanitize error messages — any PII that leaked into
+          // the error message (e.g. "Failed to send to john@example.com")
+          // must be re-redacted before it reaches the LLM context.
+          if (vault && error instanceof Error) {
             // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-            result = await originalExecute(restoredInput, ...(args.slice(1) as [any]));
-          } catch (error) {
-            // Step 3: Sanitize error messages — any PII that leaked into
-            // the error message (e.g. "Failed to send to john@example.com")
-            // must be re-redacted before it reaches the LLM context.
-            if (vault && error instanceof Error) {
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-              error.message = await vault.redact(error.message);
-            }
-            throw error;
+            error.message = await vault.redact(error.message);
           }
+          throw error;
+        }
 
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-          const sanitized = deepSanitize(result);
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+        const sanitized = deepSanitize(result);
 
-          // If a PII vault is active, extract structured PII from known
-          // fields (names, emails in JSON) then redact all string values.
-          if (vault) {
-            vault.registerStructuredPII(sanitized);
-            // Cache the REAL (pre-redaction) result once, keyed by tool call id,
-            // so DB persistence reads the same value instead of re-restoring the
-            // redacted copy.
-            if (tid) {
-              restoreCache.set(`out:${tid}`, sanitized);
-            }
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-            return await vault.redactToolResult(sanitized);
+        // If a PII vault is active, extract structured PII from known
+        // fields (names, emails in JSON) then redact all string values.
+        if (vault) {
+          vault.registerStructuredPII(sanitized);
+          // Cache the REAL (pre-redaction) result once, keyed by tool call id,
+          // so DB persistence reads the same value instead of re-restoring the
+          // redacted copy.
+          if (tid) {
+            restoreCache.set(`out:${tid}`, sanitized);
           }
-
           // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-          return sanitized;
-        },
-      };
+          return await vault.redactToolResult(sanitized);
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+        return sanitized;
+      },
+    };
   }
   return wrapped;
 }
@@ -144,12 +149,18 @@ async function redactContextMessages(
         const redactedParts = [];
         for (const part of msg.content) {
           if (part.type === "text") {
-            redactedParts.push({ ...part, text: await vault.redact(part.text) });
+            redactedParts.push({
+              ...part,
+              text: await vault.redact(part.text),
+            });
           } else if (part.type === "tool-call") {
             redactedParts.push({
               ...part,
               // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-              input: (await vault.redactToolResult(part.input)) as Record<string, unknown>,
+              input: (await vault.redactToolResult(part.input)) as Record<
+                string,
+                unknown
+              >,
             });
           } else if (part.type === "reasoning") {
             redactedParts.push({
@@ -204,10 +215,13 @@ type PrepareResult = { status: "ready"; result: PrepareAgentRunResult };
 export async function prepareAgentRun(
   params: PrepareAgentRunParams,
 ): Promise<PrepareResult> {
-  const { instanceId, chatId, userMessage, source, userMessageType, isVoice } = params;
+  const { instanceId, chatId, userMessage, source, userMessageType, isVoice } =
+    params;
   const t0 = performance.now();
   const mark = (label: string) => {
-    console.log(`[agent/prep] ${label}: ${Math.round(performance.now() - t0)}ms`);
+    console.log(
+      `[agent/prep] ${label}: ${Math.round(performance.now() - t0)}ms`,
+    );
   };
 
   const [instance, chat] = await Promise.all([
@@ -226,12 +240,27 @@ export async function prepareAgentRun(
     throw new Error("Chat not found");
   }
 
+  // Derive a one-line heading from the first user prompt, shared across all
+  // channels (web / telegram / cron). Only placeholders get renamed so a manual
+  // rename is never overwritten. The heading is display-only (never sent to the
+  // LLM), so it stores the real user text — no PII restore needed.
+  if (isPlaceholderChatName(chat.name)) {
+    const derivedName = deriveChatName(userMessage);
+    if (derivedName) {
+      await db.chat.update({
+        where: { id: chat.id },
+        data: { name: derivedName },
+      });
+      chat.name = derivedName;
+    }
+  }
+
   const user = await db.user.findUnique({
     where: { id: instance.userId },
     select: { timezone: true },
   });
 
-  const userTimezone = user?.timezone ?? "UTC";
+  const userTimezone = user?.timezone ?? DEFAULT_TIMEZONE;
   mark("db: instance+chat+user");
 
   const provider = getModelProvider(chat.model);
@@ -262,7 +291,9 @@ export async function prepareAgentRun(
   // so static content (agent title, tool descriptions, protocol, guidelines)
   // is passed through untouched — the agent name & product name must survive.
   // If not PII-redacting (local model / disabled), sections pass through as-is.
-  const redactSection = async (section: string | null): Promise<string | null> =>
+  const redactSection = async (
+    section: string | null,
+  ): Promise<string | null> =>
     section === null || section.trim() === ""
       ? section
       : transportShield
@@ -285,7 +316,8 @@ export async function prepareAgentRun(
       piiEnabled: !!piiVault,
       isVoice: isVoice ?? false,
     }),
-  );  const dbMessages = await loadContextMessages(
+  );
+  const dbMessages = await loadContextMessages(
     instanceId,
     chatId,
     chat.lastCompactionAt,
@@ -330,7 +362,7 @@ export async function prepareAgentRun(
     } catch {
       throw new Error(
         "Failed to decrypt your Composio API key. The key may be corrupted. " +
-        "Try re-entering it in Settings.",
+          "Try re-entering it in Settings.",
       );
     }
   })();
@@ -394,14 +426,14 @@ export async function prepareAgentRun(
   mark("message rows");
 
   const model = isOllama
-    // Ollama needs provider-specific options (keep-alive, context size).
-    ? ollamaProvider(chat.model, {
+    ? // Ollama needs provider-specific options (keep-alive, context size).
+      ollamaProvider(chat.model, {
         keep_alive: -1,
         options: { num_ctx: getContextWindow(chat.model) },
       })
-    // All other providers (OpenRouter-routed DeepSeek/Gemini/GPT/Llama, bare
-    // Anthropic) are built by the shared provider-agnostic helper.
-    : buildLLM(chat.model);
+    : // All other providers (OpenRouter-routed DeepSeek/Gemini/GPT/Llama, bare
+      // Anthropic) are built by the shared provider-agnostic helper.
+      buildLLM(chat.model);
 
   // NOTE: The system prompt's user-supplied sections (soul/identity/user) were
   // already redacted above via redactSection(). Static sections (agent title,
@@ -414,8 +446,8 @@ export async function prepareAgentRun(
     instructions: {
       role: "system",
       content: safeSystemPrompt,
-    // Only inject Anthropic cacheControl for Anthropic models.
-    // Other providers don't support this option.
+      // Only inject Anthropic cacheControl for Anthropic models.
+      // Other providers don't support this option.
       ...(useAnthropicOptions && {
         providerOptions: {
           anthropic: { cacheControl: { type: "ephemeral" } },
@@ -438,10 +470,7 @@ export async function prepareAgentRun(
     }),
     onFinish: async (result) => {
       await clearStreamingMessage(chatId).catch((error) =>
-        console.error(
-          "[agent/onFinish] clearStreamingMessage failed:",
-          error,
-        ),
+        console.error("[agent/onFinish] clearStreamingMessage failed:", error),
       );
       try {
         const { totalUsage, steps, finishReason } = result;
@@ -468,17 +497,13 @@ export async function prepareAgentRun(
             // without a second restoreDeep() per tool call. Falls back to restoring
             // now if the cache misses (e.g. tool executed outside the wrapper).
             const tcInput = piiVault
-              ? ((restoreCache.get(tid) ?? piiVault.restoreDeep(rawInput)) as Record<
-                  string,
-                  unknown
-                >)
+              ? ((restoreCache.get(tid) ??
+                  piiVault.restoreDeep(rawInput)) as Record<string, unknown>)
               : rawInput;
             const tcResult = rawOutput
               ? piiVault
-                ? ((restoreCache.get(`out:${tid}`) ?? piiVault.restoreDeep(rawOutput)) as Record<
-                    string,
-                    unknown
-                  >)
+                ? ((restoreCache.get(`out:${tid}`) ??
+                    piiVault.restoreDeep(rawOutput)) as Record<string, unknown>)
                 : rawOutput
               : null;
 
@@ -509,7 +534,10 @@ export async function prepareAgentRun(
           const stepReasoning =
             step.reasoningText ??
             (step.reasoning?.length
-              ? step.reasoning.map((r) => (r as { text?: string }).text ?? "").filter(Boolean).join("\n")
+              ? step.reasoning
+                  .map((r) => (r as { text?: string }).text ?? "")
+                  .filter(Boolean)
+                  .join("\n")
               : "");
           if (stepReasoning) {
             const restoredReasoning = stripResidualTokens(
@@ -554,7 +582,9 @@ export async function prepareAgentRun(
         };
         const settings: CompactionSettings = {
           contextWindow,
-          ...(isOllama ? ollamaCompactionSettings : DEFAULT_COMPACTION_SETTINGS),
+          ...(isOllama
+            ? ollamaCompactionSettings
+            : DEFAULT_COMPACTION_SETTINGS),
         };
 
         void after(() =>
@@ -574,7 +604,10 @@ export async function prepareAgentRun(
             prunedMessages,
             piiVault,
           }).catch((error) =>
-            console.error("[agent/onFinish] post-response tasks failed:", error),
+            console.error(
+              "[agent/onFinish] post-response tasks failed:",
+              error,
+            ),
           ),
         );
       } catch (error) {

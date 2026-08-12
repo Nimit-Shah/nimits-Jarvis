@@ -1,12 +1,17 @@
 "use client";
 
-import moment from "moment";
 import { Calendar, Clock, Loader2, Trash2 } from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import { Button } from "~/components/ui/button";
 import { Switch } from "~/components/ui/switch";
 import { AlertDialog } from "~/components/core/confirm-dialog";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "~/components/ui/card";
 import { Badge } from "~/components/ui/badge";
 import {
   showSuccessToast,
@@ -14,6 +19,7 @@ import {
 } from "~/components/core/toast-notifications";
 import { VirtualizedList } from "~/components/core/virtualized-list";
 import { useInstanceId } from "~/hooks/use-instance-id";
+import { DEFAULT_TIMEZONE, formatDateTimeLocal } from "~/lib/timezone";
 
 function formatCronExpression(expression: string): string {
   const parts = expression.split(" ");
@@ -33,8 +39,13 @@ function formatCronExpression(expression: string): string {
 
   if (dayOfWeek !== "*" && dayOfMonth === "*" && month === "*") {
     const days: Record<string, string> = {
-      "0": "Sunday", "1": "Monday", "2": "Tuesday", "3": "Wednesday",
-      "4": "Thursday", "5": "Friday", "6": "Saturday",
+      "0": "Sunday",
+      "1": "Monday",
+      "2": "Tuesday",
+      "3": "Wednesday",
+      "4": "Thursday",
+      "5": "Friday",
+      "6": "Saturday",
     };
     const dayName = days[dayOfWeek] ?? dayOfWeek;
     return `Every ${dayName} at ${hour}:${minute.padStart(2, "0")}`;
@@ -43,9 +54,9 @@ function formatCronExpression(expression: string): string {
   return expression;
 }
 
-function formatDate(date: Date | null): string {
+function formatDate(date: Date | null, timezone = DEFAULT_TIMEZONE): string {
   if (!date) return "\u2014";
-  return moment(date).format("MMM D, h:mm A");
+  return formatDateTimeLocal(date, timezone);
 }
 
 export function CronJobsSettings() {
@@ -94,12 +105,12 @@ export function CronJobsSettings() {
       <CardContent>
         {isLoading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            <Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
           </div>
         ) : cronJobs.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-border p-6 text-center">
-            <Calendar className="mx-auto mb-2 h-8 w-8 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
+          <div className="border-border rounded-lg border border-dashed p-6 text-center">
+            <Calendar className="text-muted-foreground mx-auto mb-2 h-8 w-8" />
+            <p className="text-muted-foreground text-sm">
               No scheduled tasks. Ask your agent to schedule something!
             </p>
           </div>
@@ -107,20 +118,20 @@ export function CronJobsSettings() {
           <VirtualizedList
             items={cronJobs}
             renderItem={(job) => (
-              <div className="flex flex-col gap-3 rounded-lg border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="border-border flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0 flex-1 space-y-1">
                   <p className="truncate text-sm font-medium">{job.prompt}</p>
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
                     <span className="flex items-center gap-1">
                       <Clock className="h-3 w-3" />
                       {formatCronExpression(job.expression)}
                     </span>
                     {job.nextRunAt && (
-                      <span>Next: {formatDate(job.nextRunAt)}</span>
+                      <span>
+                        Next: {formatDate(job.nextRunAt, job.timezone)}
+                      </span>
                     )}
-                    {!job.enabled && (
-                      <Badge variant="secondary">Paused</Badge>
-                    )}
+                    {!job.enabled && <Badge variant="secondary">Paused</Badge>}
                   </div>
                 </div>
                 <div className="flex items-center gap-2 self-end sm:self-center">
@@ -159,7 +170,7 @@ export function CronJobsSettings() {
             footer={
               isFetchingNextPage ? (
                 <div className="flex justify-center py-4">
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  <Loader2 className="text-muted-foreground h-5 w-5 animate-spin" />
                 </div>
               ) : null
             }

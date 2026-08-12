@@ -4,6 +4,7 @@ import { isTelegramConfigured } from "~/server/clients/telegram";
 import { decrypt } from "~/lib/crypto";
 import { getInstanceInput } from "./getInstance.schema";
 import { getInstanceForUser, listInstancesForUser } from "./utils";
+import { DEFAULT_TIMEZONE } from "~/lib/timezone";
 
 export const getInstance = protectedProcedure
   .input(getInstanceInput)
@@ -59,7 +60,7 @@ export const getInstance = protectedProcedure
         instance: null,
         instances,
         onboardingState: onboardingState ?? null,
-        timezone: user?.timezone ?? "UTC",
+        timezone: user?.timezone ?? DEFAULT_TIMEZONE,
         telegramConfigured: isTelegramConfigured(),
       };
     }
@@ -78,12 +79,15 @@ export const getInstance = protectedProcedure
 
         if (apiKey) {
           // 1. Fetch project ID via realtime credentials
-          const credsRes = await fetch("https://backend.composio.dev/api/v3/internal/sdk/realtime/credentials", {
-            headers: {
-              "x-api-key": apiKey,
-              "Content-Type": "application/json",
+          const credsRes = await fetch(
+            "https://backend.composio.dev/api/v3/internal/sdk/realtime/credentials",
+            {
+              headers: {
+                "x-api-key": apiKey,
+                "Content-Type": "application/json",
+              },
             },
-          });
+          );
           if (credsRes.ok) {
             const creds = await credsRes.json();
             if (creds?.project_id) {
@@ -93,13 +97,17 @@ export const getInstance = protectedProcedure
           }
 
           // 2. Fetch project display name via project config
-          const configRes = await fetch("https://backend.composio.dev/api/v3/org/project/config", {
-            headers: {
-              "x-api-key": apiKey,
-              "Content-Type": "application/json",
-              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          const configRes = await fetch(
+            "https://backend.composio.dev/api/v3/org/project/config",
+            {
+              headers: {
+                "x-api-key": apiKey,
+                "Content-Type": "application/json",
+                "User-Agent":
+                  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              },
             },
-          });
+          );
           if (configRes.ok) {
             const config = await configRes.json();
             if (config?.display_name) {
@@ -109,7 +117,10 @@ export const getInstance = protectedProcedure
           }
         }
       } catch (e) {
-        console.error("Failed to dynamically fetch project details from Composio:", e);
+        console.error(
+          "Failed to dynamically fetch project details from Composio:",
+          e,
+        );
       }
     }
 
@@ -127,7 +138,7 @@ export const getInstance = protectedProcedure
       instance.composioProjectId = updatedProjectId;
 
       // Update name in local instances list for selector dropdown
-      const targetIdx = instances.findIndex(i => i.id === instance.id);
+      const targetIdx = instances.findIndex((i) => i.id === instance.id);
       if (targetIdx !== -1) {
         instances[targetIdx] = {
           ...instances[targetIdx]!,
@@ -144,7 +155,7 @@ export const getInstance = protectedProcedure
       instance: safeInstance,
       instances,
       onboardingState: onboardingState ?? null,
-      timezone: user?.timezone ?? "UTC",
+      timezone: user?.timezone ?? DEFAULT_TIMEZONE,
       telegramConfigured: isTelegramConfigured(),
     };
   });

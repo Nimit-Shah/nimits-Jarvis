@@ -6,7 +6,13 @@ import type { ComposioClawInstance } from "~/generated/prisma/client";
 
 export type InstanceLite = Pick<
   ComposioClawInstance,
-  "id" | "userId" | "name" | "composioApiKey" | "anthropicModel" | "createdAt" | "composioProjectId"
+  | "id"
+  | "userId"
+  | "name"
+  | "composioApiKey"
+  | "anthropicModel"
+  | "createdAt"
+  | "composioProjectId"
 >;
 
 // ─── Instance Resolution ─────────────────────────────────────────────────────
@@ -16,8 +22,9 @@ export type InstanceLite = Pick<
  *
  * - If `instanceId` is provided: looks it up scoped to `userId` and throws
  *   FORBIDDEN if it doesn't exist or belongs to another user.
- * - If `instanceId` is omitted: falls back to the **most-recently-updated** instance
- *   for that user (deterministic). Creates a "Default" instance if none exist.
+ * - If `instanceId` is omitted: falls back to the **earliest-created** instance
+ *   for that user (stable, deterministic — the true "Default" project).
+ *   Creates a "Default" instance if none exist.
  *
  * Never silently falls back to another user's data.
  */
@@ -49,10 +56,14 @@ export async function getInstanceForUser(
     return instance;
   }
 
-  // Deterministic fallback — most-recently-updated instance
+  // Deterministic fallback — the earliest-created instance (the true "Default"
+  // project). Using createdAt (not updatedAt) keeps this stable: the fallback
+  // project never silently changes just because another project's settings were
+  // edited, which previously made default-model updates land on the wrong
+  // project for multi-project users.
   const fallback = await db.composioClawInstance.findFirst({
     where: { userId },
-    orderBy: { updatedAt: "desc" },
+    orderBy: { createdAt: "asc" },
     select,
   });
 
@@ -71,7 +82,12 @@ export async function getInstanceForUser(
  */
 export async function listInstancesForUser(
   userId: string,
-): Promise<Pick<ComposioClawInstance, "id" | "name" | "createdAt" | "composioProjectId">[]> {
+): Promise<
+  Pick<
+    ComposioClawInstance,
+    "id" | "name" | "createdAt" | "composioProjectId"
+  >[]
+> {
   return db.composioClawInstance.findMany({
     where: { userId },
     orderBy: { updatedAt: "desc" },

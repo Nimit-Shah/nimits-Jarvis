@@ -8,6 +8,7 @@ import type { UIMessage } from "@ai-sdk/react";
 import { NimitsJarvisChatSkeleton } from "./chat/nimits-jarvis-chat.skeleton";
 import { ErrorDisplay } from "~/components/core/error-display";
 import { useInstanceId } from "~/hooks/use-instance-id";
+import { DEFAULT_TIMEZONE } from "~/lib/timezone";
 
 type ChatContextType = ReturnType<typeof useChatHook> & {
   chatId: string;
@@ -15,6 +16,8 @@ type ChatContextType = ReturnType<typeof useChatHook> & {
   fetchOlderMessages: () => void;
   hasOlderMessages: boolean;
   isFetchingOlderMessages: boolean;
+  /** User's IANA timezone (for timezone-local message timestamps). */
+  timezone: string;
 };
 
 const ChatContext = createContext<ChatContextType | null>(null);
@@ -41,6 +44,8 @@ export function ChatProvider({
       refetchOnWindowFocus: "always",
     },
   );
+
+  const instanceQuery = trpc.nimitsJarvis.getInstance.useQuery({ instanceId });
 
   if (historyQuery.error || streamingQuery.error) {
     return (
@@ -72,9 +77,13 @@ export function ChatProvider({
     id: msg.id,
     role: msg.role,
     parts: msg.content as UIMessage["parts"],
+    // Carry the DB timestamp through the UI so hover timestamps work for
+    // loaded history. This metadata is client-only and never sent to the LLM.
+    metadata: { createdAt: msg.createdAt.toISOString() },
   }));
 
   const streamId = streamingQuery.data?.messageId ?? null;
+  const timezone = instanceQuery.data?.timezone ?? DEFAULT_TIMEZONE;
 
   return (
     <InnerChatProvider
@@ -85,6 +94,7 @@ export function ChatProvider({
       hasOlderMessages={historyQuery.hasNextPage ?? false}
       isFetchingOlderMessages={historyQuery.isFetchingNextPage}
       chatId={chatId}
+      timezone={timezone}
     >
       {children}
     </InnerChatProvider>
@@ -100,6 +110,7 @@ function InnerChatProvider({
   hasOlderMessages,
   isFetchingOlderMessages,
   chatId,
+  timezone,
 }: {
   children: ReactNode;
   initialMessages: UIMessage[];
@@ -109,6 +120,7 @@ function InnerChatProvider({
   hasOlderMessages: boolean;
   isFetchingOlderMessages: boolean;
   chatId: string;
+  timezone: string;
 }) {
   const chatHook = useChatHook({ initialMessages, streamId, chatId });
 
@@ -136,6 +148,7 @@ function InnerChatProvider({
         fetchOlderMessages,
         hasOlderMessages,
         isFetchingOlderMessages,
+        timezone,
       }}
     >
       {children}
@@ -145,6 +158,7 @@ function InnerChatProvider({
 
 export function useChatContext() {
   const ctx = useContext(ChatContext);
-  if (!ctx) throw new Error("useChatContext must be used within a ChatProvider");
+  if (!ctx)
+    throw new Error("useChatContext must be used within a ChatProvider");
   return ctx;
 }

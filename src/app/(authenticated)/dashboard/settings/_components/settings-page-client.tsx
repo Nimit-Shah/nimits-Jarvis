@@ -1,7 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { Shield, MessageSquare, Clock, Brain, AlertTriangle } from "lucide-react";
+import {
+  Shield,
+  MessageSquare,
+  Clock,
+  Brain,
+  AlertTriangle,
+} from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import Link from "next/link";
 import { ErrorDisplay } from "~/components/core/error-display";
@@ -23,17 +29,45 @@ const CATEGORIES: Array<{
   icon: typeof Shield;
   description: string;
 }> = [
-  { id: "security", label: "Security", icon: Shield, description: "PII protection and gateways" },
-  { id: "telegram", label: "Telegram", icon: MessageSquare, description: "Bot connection" },
-  { id: "cron", label: "Scheduled Tasks", icon: Clock, description: "Recurring jobs" },
-  { id: "memory", label: "Memory", icon: Brain, description: "AI memory and profile" },
-  { id: "danger", label: "Danger Zone", icon: AlertTriangle, description: "Delete project" },
+  {
+    id: "security",
+    label: "Security",
+    icon: Shield,
+    description: "PII protection and gateways",
+  },
+  {
+    id: "telegram",
+    label: "Telegram",
+    icon: MessageSquare,
+    description: "Bot connection",
+  },
+  {
+    id: "cron",
+    label: "Scheduled Tasks",
+    icon: Clock,
+    description: "Recurring jobs",
+  },
+  {
+    id: "memory",
+    label: "Memory",
+    icon: Brain,
+    description: "AI memory and profile",
+  },
+  {
+    id: "danger",
+    label: "Danger Zone",
+    icon: AlertTriangle,
+    description: "Delete project",
+  },
 ];
 
 export function SettingsPageClient() {
   const [instanceId] = useInstanceId();
-  const [activeCategory, setActiveCategory] = useState<SettingsCategory>("security");
-  const { data, isLoading, error } = trpc.nimitsJarvis.getInstance.useQuery({ instanceId });
+  const [activeCategory, setActiveCategory] =
+    useState<SettingsCategory>("security");
+  const { data, isLoading, error } = trpc.nimitsJarvis.getInstance.useQuery({
+    instanceId,
+  });
   const instance = data?.instance ?? null;
 
   if (isLoading) {
@@ -54,7 +88,9 @@ export function SettingsPageClient() {
     return (
       <div className="flex h-full items-center justify-center p-4">
         <div className="text-center">
-          <p className="text-[13px] text-muted-foreground">No Nimits-Jarvis instance found.</p>
+          <p className="text-muted-foreground text-[13px]">
+            No Nimits-Jarvis instance found.
+          </p>
           <Link
             href="/dashboard"
             className="text-primary mt-2 inline-block text-[13px] hover:underline"
@@ -69,8 +105,10 @@ export function SettingsPageClient() {
   return (
     <div className="flex h-full">
       {/* Left: Category nav */}
-      <div className="w-[220px] shrink-0 border-r border-border p-3 space-y-0.5">
-        <h1 className="text-[13px] font-semibold text-foreground px-2 pb-3">Settings</h1>
+      <div className="border-border w-[220px] shrink-0 space-y-0.5 border-r p-3">
+        <h1 className="text-foreground px-2 pb-3 text-[13px] font-semibold">
+          Settings
+        </h1>
         {CATEGORIES.map((cat) => {
           const Icon = cat.icon;
           const isActive = activeCategory === cat.id;
@@ -79,7 +117,7 @@ export function SettingsPageClient() {
               key={cat.id}
               onClick={() => setActiveCategory(cat.id)}
               className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-left transition-colors",
+                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition-colors",
                 isActive
                   ? "bg-accent/60 text-foreground font-medium"
                   : "hover:bg-accent/30 text-muted-foreground hover:text-foreground",
@@ -93,13 +131,13 @@ export function SettingsPageClient() {
       </div>
 
       {/* Right: Category content */}
-      <div className="flex-1 min-w-0 overflow-y-auto p-6">
+      <div className="min-w-0 flex-1 overflow-y-auto p-6">
         <div className="mx-auto max-w-2xl space-y-4">
           <div className="pb-2">
-            <h2 className="text-[14px] font-semibold text-foreground">
+            <h2 className="text-foreground text-[14px] font-semibold">
               {CATEGORIES.find((c) => c.id === activeCategory)?.label}
             </h2>
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-muted-foreground text-[12px]">
               {CATEGORIES.find((c) => c.id === activeCategory)?.description}
             </p>
           </div>
@@ -107,8 +145,10 @@ export function SettingsPageClient() {
           {activeCategory === "security" && (
             <ErrorBoundary>
               <ModelSettings
+                instanceId={instance.id}
                 piiRedactionEnabled={instance.piiRedactionEnabled}
                 openRouterGatewayEnabled={instance.openRouterGatewayEnabled}
+                defaultModel={instance.anthropicModel}
               />
             </ErrorBoundary>
           )}
@@ -120,7 +160,7 @@ export function SettingsPageClient() {
           )}
 
           {activeCategory === "telegram" && !data?.telegramConfigured && (
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-muted-foreground text-[12px]">
               Telegram is not configured on this deployment.
             </p>
           )}
