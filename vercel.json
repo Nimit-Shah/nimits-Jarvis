@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/nimits-jarvis",
-      "schedule": "0 0 * * *"
+      "schedule": "* * * * *"
     }
   ]
 }

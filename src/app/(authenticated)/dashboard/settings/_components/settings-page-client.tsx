@@ -18,7 +18,6 @@ import { TelegramSettings } from "./telegram-settings";
 import { CronJobsSettings } from "./cron-jobs-settings";
 import { MemorySettings } from "./memory-settings";
 import { DangerZone } from "./danger-zone";
-import { SettingsPageSkeleton } from "./settings-page.skeleton";
 import { useInstanceId } from "~/hooks/use-instance-id";
 
 type SettingsCategory = "security" | "telegram" | "cron" | "memory" | "danger";
@@ -71,7 +70,11 @@ export function SettingsPageClient() {
   const instance = data?.instance ?? null;
 
   if (isLoading) {
-    return <SettingsPageSkeleton />;
+    return (
+      <div className="flex h-full items-center justify-center p-4">
+        <div className="bg-muted h-5 w-5 animate-pulse rounded-md" />
+      </div>
+    );
   }
 
   if (error) {

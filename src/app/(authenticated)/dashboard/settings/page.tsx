@@ -12,14 +12,6 @@ export default async function Page({
     await trpcServer.api.nimitsJarvis.getInstance.prefetch({
       instanceId: instance,
     });
-    void trpcServer.api.nimitsJarvis.getCronJobs.prefetchInfinite({
-      instanceId: instance,
-      limit: 20,
-    });
-    void trpcServer.api.nimitsJarvis.getMemories.prefetch({
-      instanceId: instance,
-      limit: 50,
-    });
   }
 
   return (
