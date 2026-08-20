@@ -39,9 +39,16 @@ async function releaseJobLocks(
   invocationId: string,
   now: Date,
   error?: string,
+  retryDelaySeconds?: number,
 ) {
+  const isRetry = typeof retryDelaySeconds === "number" && retryDelaySeconds > 0;
   const values = jobs.map((job) => {
-    const nextRunAt = computeNextRunSafe(job.expression, job.timezone);
+    let nextRunAt: Date | null = null;
+    if (isRetry) {
+      nextRunAt = new Date(now.getTime() + retryDelaySeconds * 1000);
+    } else {
+      nextRunAt = computeNextRunSafe(job.expression, job.timezone);
+    }
     return nextRunAt
       ? Prisma.sql`(${job.id}, ${nextRunAt}::timestamptz)`
       : Prisma.sql`(${job.id}, NULL::timestamptz)`;
@@ -50,7 +57,7 @@ async function releaseJobLocks(
   await db.$queryRaw`
     UPDATE composio_claw_cron_job AS cj
     SET
-      "lastRunAt" = CASE WHEN ${error ?? null}::text IS NULL THEN ${now}::timestamptz ELSE cj."lastRunAt" END,
+      "lastRunAt" = CASE WHEN ${error ?? null}::text IS NULL AND NOT ${isRetry} THEN ${now}::timestamptz ELSE cj."lastRunAt" END,
       "nextRunAt" = v."nextRunAt"::timestamptz,
       "lockedAt" = NULL,
       "lockedBy" = NULL,
@@ -71,6 +78,7 @@ async function executeJobs(
   try {
     const allowedJobs: CronJobRow[] = [];
     const limitedJobs: CronJobRow[] = [];
+    let maxRetryAfterSeconds = 60;
 
     for (const job of jobs) {
       const limit = await rateLimit(job.userId, "cron");
@@ -78,6 +86,9 @@ async function executeJobs(
         allowedJobs.push(job);
       } else {
         limitedJobs.push(job);
+        if (limit.retryAfterSeconds && limit.retryAfterSeconds > maxRetryAfterSeconds) {
+          maxRetryAfterSeconds = limit.retryAfterSeconds;
+        }
         console.warn(
           `[cron/execute] rate limit exceeded for user ${job.userId}; job_id=${job.id}; retry_after=${limit.retryAfterSeconds}s`,
         );
@@ -85,7 +96,13 @@ async function executeJobs(
     }
 
     if (limitedJobs.length > 0) {
-      await releaseJobLocks(limitedJobs, invocationId, now);
+      await releaseJobLocks(
+        limitedJobs,
+        invocationId,
+        now,
+        "Rate limit exceeded (queued for retry)",
+        maxRetryAfterSeconds,
+      );
     }
 
     if (allowedJobs.length === 0) {

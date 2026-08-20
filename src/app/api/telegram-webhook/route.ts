@@ -271,6 +271,10 @@ async function handleRegularMessage(
       await sendTelegramMessage(chatId, "-");
       return;
     }
-    throw error;
+    console.error("[telegram-webhook] Error processing message:", error);
+    await sendTelegramMessage(
+      chatId,
+      "Sorry, I encountered an error processing your request. Please try again.",
+    );
   }
 }

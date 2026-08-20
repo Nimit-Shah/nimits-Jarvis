@@ -47,10 +47,21 @@ async function resolveChatId(instanceId: string, chatId?: string): Promise<strin
   });
 
   if (!firstChat) {
-    throw new TRPCError({
-      code: "NOT_FOUND",
-      message: "No chats found for this instance",
+    const instance = await db.composioClawInstance.findUnique({
+      where: { id: instanceId },
+      select: { anthropicModel: true },
     });
+
+    const createdChat = await db.chat.create({
+      data: {
+        instanceId,
+        name: "New Chat",
+        model: instance?.anthropicModel ?? "claude-3-7-sonnet-20250219",
+      },
+      select: { id: true },
+    });
+
+    return createdChat.id;
   }
 
   return firstChat.id;
