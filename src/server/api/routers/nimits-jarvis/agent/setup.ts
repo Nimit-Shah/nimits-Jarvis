@@ -306,7 +306,7 @@ export async function prepareAgentRun(
     redactSection(instance.userPrompt),
   ]);
 
-  const systemPrompt = sanitizeString(
+  let systemPrompt = sanitizeString(
     buildSystemPrompt({
       soulPrompt: safeSoul,
       identityPrompt: safeIdentity,
@@ -317,6 +317,24 @@ export async function prepareAgentRun(
       isVoice: isVoice ?? false,
     }),
   );
+
+  // §10.1 — one sentence per enabled MCP server, under 50 tokens each
+  try {
+    const mcpServersForPrompt = await db.mcpServer.findMany({
+      where: { instanceId: instance.id, enabled: true },
+      select: { label: true },
+      take: 10,
+    });
+    if (mcpServersForPrompt.length > 0) {
+      const block = [
+        "Connected MCP servers for this project:",
+        ...mcpServersForPrompt.map((s) => `- ${s.label}: external tooling via MCP.`),
+      ].join("\n");
+      systemPrompt = `${systemPrompt}\n\n---\n\n${block}`;
+    }
+  } catch {
+    // no-op — prompt without MCP block is still valid
+  }
   const dbMessages = await loadContextMessages(
     instanceId,
     chatId,
@@ -378,6 +396,10 @@ export async function prepareAgentRun(
   );
   mark("composio session+tools");
 
+  // MCP tools — lazy, never throws, never blocks on network (cached schemas only)
+  const { getOrCreateMcpTools } = await import("~/server/clients/mcp");
+  const rawMcpTools = await getOrCreateMcpTools(instance.id, source);
+
   await db.message.create({
     data: {
       instanceId,
@@ -388,9 +410,10 @@ export async function prepareAgentRun(
       ...(userMessageType && { messageType: userMessageType }),
     },
   });
-  // Trim verbose Composio tool schemas to reduce token usage by ~40-60%.
+  // Trim verbose tool schemas to reduce token usage by ~40-60%.
   // This prevents free-tier TPM rate-limit errors with smaller models.
-  const composioTools = optimizeToolSchemas(rawComposioTools);
+  // MCP goes before optimize so its schemas are also trimmed; customTools stay raw.
+  const optimized = optimizeToolSchemas({ ...rawComposioTools, ...rawMcpTools });
 
   const customTools = createCustomTools(instanceId, chatId, userTimezone);
 
@@ -403,8 +426,9 @@ export async function prepareAgentRun(
   // Wrap tool executors with sanitization + optional PII redaction.
   // When a vault is active, tool results are scanned for PII and
   // sensitive values are replaced with tokens before the LLM sees them.
+  // One merge point — customTools last so they win on collision.
   const allTools: ToolSet = wrapToolExecutors(
-    { ...composioTools, ...customTools },
+    { ...optimized, ...customTools },
     piiVault,
     restoreCache,
   );

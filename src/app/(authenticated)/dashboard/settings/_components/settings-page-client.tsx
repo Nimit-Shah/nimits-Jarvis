@@ -7,6 +7,7 @@ import {
   Clock,
   Brain,
   AlertTriangle,
+  Server,
 } from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import Link from "next/link";
@@ -19,8 +20,9 @@ import { CronJobsSettings } from "./cron-jobs-settings";
 import { MemorySettings } from "./memory-settings";
 import { DangerZone } from "./danger-zone";
 import { useInstanceId } from "~/hooks/use-instance-id";
+import { McpServersPanel } from "./mcp/mcp-servers-panel";
 
-type SettingsCategory = "security" | "telegram" | "cron" | "memory" | "danger";
+type SettingsCategory = "security" | "telegram" | "cron" | "memory" | "mcp" | "danger";
 
 const CATEGORIES: Array<{
   id: SettingsCategory;
@@ -51,6 +53,12 @@ const CATEGORIES: Array<{
     label: "Memory",
     icon: Brain,
     description: "AI memory and profile",
+  },
+  {
+    id: "mcp",
+    label: "MCP Servers",
+    icon: Server,
+    description: "External MCP endpoints (per project)",
   },
   {
     id: "danger",
@@ -177,6 +185,12 @@ export function SettingsPageClient() {
           {activeCategory === "memory" && (
             <ErrorBoundary>
               <MemorySettings />
+            </ErrorBoundary>
+          )}
+
+          {activeCategory === "mcp" && (
+            <ErrorBoundary>
+              <McpServersPanel instanceId={instance.id} />
             </ErrorBoundary>
           )}
 

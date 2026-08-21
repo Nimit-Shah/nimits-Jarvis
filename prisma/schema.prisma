@@ -135,14 +135,58 @@ model ComposioClawInstance {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  chats    Chat[]
-  messages Message[]
-  memories Memory[]
-  cronJobs CronJob[]
+  chats      Chat[]
+  messages   Message[]
+  memories   Memory[]
+  cronJobs   CronJob[]
+  mcpServers McpServer[]
 
   @@index([userId])
   @@index([userId, createdAt])
   @@map("composio_claw_instance")
+}
+
+model McpServer {
+  id           String   @id @default(cuid())
+  instanceId   String
+  instance     ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  name         String // slug: lowercase, [a-z0-9-]; becomes namespace segment
+  label        String // human display name
+  url          String // http://127.0.0.1:3845/mcp | https://mcp.example.com/mcp
+  headersEnc   String? // AES-256-GCM ciphertext of Record<string,string>
+  enabled      Boolean  @default(true)
+
+  status       String   @default("unknown") // unknown | ok | failed | unreachable
+  lastError    String?
+  lastSyncedAt DateTime?
+  needsSync    Boolean  @default(false)
+
+  tools     McpTool[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([instanceId, name])
+  @@index([instanceId])
+  @@map("mcp_server")
+}
+
+model McpTool {
+  id             String   @id @default(cuid())
+  mcpServerId    String
+  server         McpServer @relation(fields: [mcpServerId], references: [id], onDelete: Cascade)
+
+  originalName   String // exact name to send back in callTool()
+  namespacedName String // mcp__<server>__<tool>; what the model sees
+  description    String?
+  inputSchema    Json // JSON Schema as returned by listTools()
+
+  enabled  Boolean @default(false) // OFF by default
+  cronSafe Boolean @default(false)
+
+  @@unique([mcpServerId, originalName])
+  @@index([mcpServerId, enabled])
+  @@map("mcp_tool")
 }
 
 model Chat {
