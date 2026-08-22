@@ -17,7 +17,7 @@ export const createTRPCContext = async (opts: { headers: Headers }) => {
 const t = initTRPC.context<typeof createTRPCContext>().create({
   transformer: superjson,
   sse: {
-    maxDurationMs: 50_000, // Close gracefully before serverless function timeout
+    maxDurationMs: 270_000, // Close gracefully before serverless function timeout (unbounded, Pro buffer)
     ping: {
       enabled: true,
       intervalMs: 15_000,

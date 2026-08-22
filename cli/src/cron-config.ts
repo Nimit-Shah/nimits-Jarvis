@@ -6,16 +6,16 @@ import { spinner, log } from "@clack/prompts";
 
 const exec = promisify(_exec);
 
-// Hobby plan only allows daily crons. Pro+ allows arbitrary schedules.
-const HOBBY_SCHEDULE = "0 0 * * *";
+// Unbounded: all plans run with Pro-level ceilings — cron every minute, max execution.
+const HOBBY_SCHEDULE = "* * * * *";
 const PRO_SCHEDULE = "* * * * *";
 
-// Hobby caps function execution at 60s. Pro+ allows up to 300s.
-const HOBBY_MAX_DURATION = 60;
+// No Hobby cap — always allow long runs (up to 300s, Vercel Pro/Fluid limit).
+const HOBBY_MAX_DURATION = 300;
 const PRO_MAX_DURATION = 300;
 
-// Leave a buffer so tRPC closes its SSE stream before Vercel kills the function.
-const HOBBY_TRPC_MAX_DURATION_MS = 50_000;
+// tRPC buffer under function timeout.
+const HOBBY_TRPC_MAX_DURATION_MS = 270_000;
 const PRO_TRPC_MAX_DURATION_MS = 270_000;
 
 const ROUTE_FILES_WITH_MAX_DURATION = [

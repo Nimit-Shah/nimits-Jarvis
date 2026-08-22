@@ -163,7 +163,7 @@ function createPIIRestoreStringTransform(
   });
 }
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   // Pre-warm DeBERTa model on first request (non-blocking)

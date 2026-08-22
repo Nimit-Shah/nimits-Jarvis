@@ -479,9 +479,9 @@ export async function prepareAgentRun(
       }),
     } satisfies SystemModelMessage,
     tools: allTools,
-    // Step limit is set to 20 to prevent infinite runaway loops,
-    // while still providing ample steps for complex agentic tool actions.
-    stopWhen: stepCountIs(20),
+    // No per-prompt step ceiling — allow long-running tasks (e.g., 33-product scrape) to complete.
+    // Hard ceiling removed per user request; relies on model natural termination and Vercel maxDuration (300s).
+    stopWhen: stepCountIs(100),
     // Disable Qwen3 thinking mode to prevent empty-output errors
     // and cut token generation time in half.
     // maxTokens: 512 caps conversational replies; tool-call responses are

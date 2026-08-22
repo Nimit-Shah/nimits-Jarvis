@@ -182,7 +182,7 @@ async function executeJobs(
   }
 }
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   // Bearer-auth via CRON_SECRET (auto-injected by Vercel for cron-triggered
