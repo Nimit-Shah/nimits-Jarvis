@@ -256,6 +256,7 @@ export class PIIVault {
       for (const [key, val] of entries) {
         const lowerKey = key.toLowerCase();
         if (
+          FINANCIAL_NUMERIC_KEYS.has(lowerKey) ||
           SYSTEM_METADATA_KEYS.has(lowerKey) ||
           // Any *_url key is a functional URL field (GitHub API templates like
           // archive_url/branches_url/clone_url/svn_url/ssh_url, avatar_url, etc.)
@@ -373,6 +374,24 @@ export class PIIVault {
     return false;
   }
 }
+
+/**
+ * Financial OHLCV keys — pure numeric market data (open/high/low/close/volume/trade_date).
+ * These are never PII; tokenizing them as phone numbers breaks backtests and was the
+ * direct cause of BTC volume → [CLAW_PHONE_*] over-redaction. Bypassed verbatim.
+ */
+const FINANCIAL_NUMERIC_KEYS = new Set([
+  "open",
+  "high",
+  "low",
+  "close",
+  "volume",
+  "trade_date",
+  "tradeDate",
+  "adj_close",
+  "adjClose",
+  "vwap",
+]);
 
 /**
  * Object key names representing structural API metadata, tool definitions, schemas,
