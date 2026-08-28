@@ -28,6 +28,23 @@ import {
   DEFAULT_COMPACTION_SETTINGS,
   type CompactionSettings,
 } from "./context/token-estimation";
+
+// ---------------------------------------------------------------------------
+// Helpers for collapsed reasoning/tool summary (Claude.ai-inspired)
+// ---------------------------------------------------------------------------
+function formatToolDisplayName(raw: string): string {
+  let d = raw;
+  for (const p of ["COMPOSIO_", "RUBE_"]) if (d.startsWith(p)) { d = d.slice(p.length); break; }
+  return d.replace(/_/g, " ").split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+}
+function extractReasoningGloss(text: string): string | undefined {
+  const m = text.match(/^\s*SUMMARY:\s*(.+)$/m);
+  if (m?.[1]) return m[1].trim().slice(0, 80);
+  const first = text.split(/[.!\n]/)[0]?.trim() ?? "";
+  if (!first) return undefined;
+  const words = first.split(/\s+/).slice(0, 10).join(" ");
+  return words.length > 3 ? words : undefined;
+}
 import { stripToolResultEchoes } from "./strip-tool-echoes";
 import { clearStreamingMessage } from "~/server/clients/redis";
 import type { ReconstructedMessage } from "./types";
@@ -163,10 +180,12 @@ async function redactContextMessages(
               >,
             });
           } else if (part.type === "reasoning") {
+            const gloss = (part as unknown as { gloss?: string }).gloss;
             redactedParts.push({
               ...part,
               text: await vault.redact(part.text as string),
-            });
+              ...(gloss !== undefined ? { gloss: await vault.redact(gloss) } : {}),
+            } as typeof part);
           } else {
             redactedParts.push(part);
           }
@@ -509,6 +528,28 @@ export async function prepareAgentRun(
         const assistantParts: Array<Record<string, unknown>> = [];
 
         for (const step of steps) {
+          // Persist reasoning BEFORE tool calls so chainItems order is thinking → acting
+          const stepReasoning =
+            step.reasoningText ??
+            (step.reasoning?.length
+              ? step.reasoning
+                  .map((r) => (r as { text?: string }).text ?? "")
+                  .filter(Boolean)
+                  .join("\n")
+              : "");
+          if (stepReasoning) {
+            const restoredReasoning = stripResidualTokens(
+              piiVault ? piiVault.restore(stepReasoning) : stepReasoning,
+            );
+            const gloss = extractReasoningGloss(restoredReasoning);
+            assistantParts.push({
+              type: "reasoning" as const,
+              text: restoredReasoning,
+              gloss: gloss ?? undefined,
+              state: "done" as const,
+            } as Record<string, unknown>);
+          }
+
           for (let i = 0; i < step.toolCalls.length; i++) {
             const tc = step.toolCalls[i]!;
             const tr = step.toolResults[i];
@@ -535,6 +576,7 @@ export async function prepareAgentRun(
               type: "dynamic-tool" as const,
               toolCallId: tc.toolCallId,
               toolName: tc.toolName,
+              display_name: formatToolDisplayName(tc.toolName),
               state: tcResult ? "output-available" : "input-available",
               input: tcInput,
               output: tcResult ?? {},
@@ -551,27 +593,6 @@ export async function prepareAgentRun(
               piiVault ? piiVault.restore(stepText) : stepText,
             );
             assistantParts.push({ type: "text" as const, text: restoredText });
-          }
-
-          // Persist reasoning/thinking for replay in the chain-of-thought UI.
-          // Restore PII tokens to real values so the human never sees tokens.
-          const stepReasoning =
-            step.reasoningText ??
-            (step.reasoning?.length
-              ? step.reasoning
-                  .map((r) => (r as { text?: string }).text ?? "")
-                  .filter(Boolean)
-                  .join("\n")
-              : "");
-          if (stepReasoning) {
-            const restoredReasoning = stripResidualTokens(
-              piiVault ? piiVault.restore(stepReasoning) : stepReasoning,
-            );
-            assistantParts.push({
-              type: "reasoning" as const,
-              text: restoredReasoning,
-              state: "done" as const,
-            });
           }
         }
 

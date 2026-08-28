@@ -48,6 +48,8 @@ function deepSanitize<T>(value: T): T {
 export const contentPartSchema = z.object({
   type: z.string(),
   text: z.string().optional(),
+  gloss: z.string().optional(),
+  display_name: z.string().optional(),
 });
 
 export const contentSchema = z.array(contentPartSchema);
@@ -169,6 +171,7 @@ const dynamicToolPartSchema = z.object({
   type: z.literal("dynamic-tool"),
   toolCallId: z.string(),
   toolName: z.string(),
+  display_name: z.string().optional(),
   state: z.string(),
   input: z.unknown().optional(),
   output: z.unknown().optional(),
@@ -221,7 +224,7 @@ export function reconstructMessages(
           toolName: string;
           input: Record<string, unknown>;
         }
-      | { type: "reasoning"; text: string }
+      | { type: "reasoning"; text: string; gloss?: string }
     > = [];
     if (textContent) {
       assistantContent.push({ type: "text", text: textContent });

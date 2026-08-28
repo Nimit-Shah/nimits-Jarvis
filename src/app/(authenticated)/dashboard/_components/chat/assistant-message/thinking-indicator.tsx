@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { THINKING_WORDS } from "./thinking-words";
+import { TextShimmer } from "~/components/ui/text-shimmer";
 
 export function ThinkingIndicator() {
   const [index, setIndex] = useState(0);
@@ -15,9 +16,13 @@ export function ThinkingIndicator() {
 
   return (
     <div className="py-2">
-      <span className="text-muted-foreground/60 animate-pulse text-[12px] font-medium">
-        {THINKING_WORDS[index]}...
-      </span>
+      <TextShimmer
+        as="span"
+        duration={1}
+        className="text-[12px] font-medium"
+      >
+        {`${THINKING_WORDS[index]}...`}
+      </TextShimmer>
     </div>
   );
 }

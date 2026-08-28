@@ -21,6 +21,7 @@ import { stripToolResultEchoes } from "~/server/api/routers/nimits-jarvis/agent/
 import { PROSE_CLASSES } from "./prose-classes";
 import { MessageTimestamp } from "../message-timestamp";
 import { useChatContext } from "../../chat-context";
+import { formatToolName } from "~/components/ui/tool-calls-section-utils/tool-icons";
 
 type TextUIPart = { type: "text"; text: string };
 
@@ -28,8 +29,9 @@ function mapToToolCallEntry(
   part: DynamicToolUIPart | ToolUIPart,
 ): ToolCallEntry {
   const rawName = getToolName(part);
-  const displayName = rawName.replace(/^(COMPOSIO_|RUBE_)/, "");
-  const category = displayName.split("_")[0]?.toLowerCase() ?? "general";
+  const persistedDisplayName = (part as unknown as { display_name?: string }).display_name;
+  const displayName = persistedDisplayName ?? formatToolName(rawName);
+  const category = rawName.replace(/^(COMPOSIO_|RUBE_)/, "").split("_")[0]?.toLowerCase() ?? "general";
 
   let state: ToolCallEntry["state"];
   if (part.state === "input-streaming" || part.state === "input-available") {
@@ -43,6 +45,7 @@ function mapToToolCallEntry(
   return {
     tool_name: rawName,
     tool_category: category,
+    display_name: displayName,
     message:
       state === "input-streaming" || state === "input-available"
         ? `Using ${displayName}...`
@@ -54,7 +57,7 @@ function mapToToolCallEntry(
           ? part.output
           : JSON.stringify(part.output, null, 2)
         : undefined,
-    integration_name: displayName.replace(/_/g, " "),
+    integration_name: displayName,
     state,
   };
 }
@@ -135,7 +138,7 @@ export function AssistantMessage({ message, status }: AssistantMessageProps) {
 
   // Create interleaved items for proper ordering
   type ChainItem =
-    | { type: "reasoning"; text: string }
+    | { type: "reasoning"; text: string; gloss?: string }
     | { type: "tool-call"; entry: ToolCallEntry };
 
   const chainItems: ChainItem[] = segments
@@ -149,7 +152,8 @@ export function AssistantMessage({ message, status }: AssistantMessageProps) {
     )
     .map((s) => {
       if (s.kind === "reasoning") {
-        return { type: "reasoning" as const, text: s.part.text };
+        const gloss = (s.part as unknown as { gloss?: string }).gloss;
+        return { type: "reasoning" as const, text: s.part.text, gloss };
       }
       return { type: "tool-call" as const, entry: mapToToolCallEntry(s.part) };
     });
@@ -193,6 +197,7 @@ export function AssistantMessage({ message, status }: AssistantMessageProps) {
           toolCalls={toolCalls.map(mapToToolCallEntry)}
           reasoningTexts={reasoningTexts}
           chainItems={chainItems}
+          isStreaming={isRunning}
         />
       )}
 

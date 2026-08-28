@@ -224,6 +224,15 @@ const MESSAGING_GUIDELINES = `## Messaging Style
 - NEVER echo raw tool results, JSON, or HTML back to the user. Tool results are displayed separately in the UI. Instead, summarize what you found in natural language.
 - NEVER share internal IDs (cron job IDs, etc.) with the user - they're implementation details. Describe things by their content or purpose instead.`;
 
+const REASONING_GLOSS_INSTRUCTION = `## Reasoning Summary Contract (for collapsed UI)
+
+When you think before acting, start each thinking block with a single line: \`SUMMARY: <≤10 words, verb phrase, what you will do next>\`
+Examples:
+- \`SUMMARY: Checking PII vault for existing token\`
+- \`SUMMARY: Searching Gmail for Q4 report\`
+- \`SUMMARY: Scanning calendar for conflicts\`
+Keep the SUMMARY on its own first line, then continue normal reasoning on the next line. Do not wrap it in quotes or tags. If a thinking block has no SUMMARY line, the UI will extract the first sentence as fallback.`;
+
 const PII_ANONYMIZATION_PROTOCOL = `## PII & Anonymization Layer Protocol
 
 To preserve data privacy, all incoming contextual elements, tool data (such as emails, notifications, and logs), and inputs have been processed through the Nimits-Jarvis Anonymization Layer.
@@ -284,6 +293,7 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
   sections.push(CUSTOM_TOOLS_DESCRIPTION);
   sections.push(SCHEDULED_TASK_NOTE);
   sections.push(MESSAGING_GUIDELINES);
+  sections.push(REASONING_GLOSS_INSTRUCTION);
 
   // Only inject PII protocol when redaction is active (non-local models).
   if (params.piiEnabled) {

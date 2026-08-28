@@ -113,6 +113,18 @@ export class PIITransportShield {
     // before the LLM sees it when replayed as context.
     if (result.type === "reasoning" && typeof result.text === "string") {
       result.text = await this.vault.redact(result.text);
+      if (typeof (result as Record<string, unknown>).gloss === "string") {
+        (result as Record<string, unknown>).gloss = await this.vault.redact(
+          (result as Record<string, unknown>).gloss as string,
+        );
+      }
+    }
+
+    // Persisted display_name on dynamic-tool parts — redact if it somehow contains PII
+    if (result.type === "dynamic-tool" && typeof (result as Record<string, unknown>).display_name === "string") {
+      (result as Record<string, unknown>).display_name = await this.vault.redact(
+        (result as Record<string, unknown>).display_name as string,
+      );
     }
 
     return result;
