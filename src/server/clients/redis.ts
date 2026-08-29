@@ -53,28 +53,28 @@ const STREAMING_KEY_TTL = 600; // 10 minutes
 // ─── Streaming Message Tracker ──────────────────────────────────────────────
 
 export async function setStreamingMessage(
-  instanceId: string,
+  chatId: string,
   streamId: string,
 ): Promise<void> {
   const r = getRedis();
   if (!r) return;
-  await r.set(`streaming:${instanceId}`, streamId, "EX", STREAMING_KEY_TTL);
+  await r.set(`streaming:${chatId}`, streamId, "EX", STREAMING_KEY_TTL);
 }
 
 export async function getStreamingMessage(
-  instanceId: string,
+  chatId: string,
 ): Promise<string | null> {
   const r = getRedis();
   if (!r) return null;
-  return r.get(`streaming:${instanceId}`);
+  return r.get(`streaming:${chatId}`);
 }
 
 export async function clearStreamingMessage(
-  instanceId: string,
+  chatId: string,
 ): Promise<void> {
   const r = getRedis();
   if (!r) return;
-  await r.del(`streaming:${instanceId}`);
+  await r.del(`streaming:${chatId}`);
 }
 
 // ─── Telegram Deduplication ─────────────────────────────────────────────────

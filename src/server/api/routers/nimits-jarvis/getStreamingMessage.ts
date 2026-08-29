@@ -46,10 +46,7 @@ export const getStreamingMessage = protectedProcedure
     });
 
     if (!firstChat) {
-      throw new TRPCError({
-        code: "NOT_FOUND",
-        message: "No chats found for this instance",
-      });
+      return null;
     }
 
     chatId = firstChat.id;

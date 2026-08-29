@@ -41,13 +41,29 @@ export function ChatProvider({
   const streamingQuery = trpc.nimitsJarvis.getStreamingMessage.useQuery(
     { instanceId, chatId },
     {
+      enabled: !!chatId || !!instanceId,
       refetchOnWindowFocus: "always",
+      staleTime: 5_000,
+      retry: (failureCount, error) => {
+        const code = (error as { data?: { code?: string } })?.data?.code;
+        if (code === "NOT_FOUND" || code === "FORBIDDEN") return false;
+        return failureCount < 3;
+      },
     },
   );
 
   const instanceQuery = trpc.nimitsJarvis.getInstance.useQuery({ instanceId });
 
-  if (historyQuery.error || streamingQuery.error) {
+  const hasFatalHistoryError = !!historyQuery.error;
+  const hasFatalStreamingError = (() => {
+    if (!streamingQuery.error) return false;
+    const code = (streamingQuery.error as { data?: { code?: string } })?.data?.code;
+    // NOT_FOUND/FORBIDDEN from streaming poll is non-fatal (no active stream yet or stale chat)
+    if (code === "NOT_FOUND" || code === "FORBIDDEN") return false;
+    return true;
+  })();
+
+  if (hasFatalHistoryError || hasFatalStreamingError) {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center p-8">
         <ErrorDisplay
