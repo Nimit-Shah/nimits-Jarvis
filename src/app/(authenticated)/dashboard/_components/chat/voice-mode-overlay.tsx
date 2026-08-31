@@ -1,3 +1,11 @@
+/**
+ * @deprecated Old full-screen voice overlay — kept for reference per request.
+ * Previous implementation commented out in favor of Claude-exact inline voice
+ * (see inline-voice-bar.tsx + use-voice-session.ts). Do not import this file
+ * in new code. It is retained but not used in v1 local build.
+ * Original logic: fixed inset-0 z-50 neural canvas + orb — replaced by docked
+ * bottom bar with Listening… / Jarvis is speaking… (frame_020.jpg:1) + starburst.
+ */
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";

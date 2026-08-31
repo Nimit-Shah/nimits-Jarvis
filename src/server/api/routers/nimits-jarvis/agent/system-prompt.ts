@@ -262,10 +262,19 @@ The user is speaking to you using voice. Your response will be read aloud by a t
 ### When You Need To Do More
 - If you are performing a multi-step task (calling tools, searching, fetching data), give a brief spoken status update first, e.g., "Let me look that up for you." Then complete the task and return the result as a short spoken summary.
 - If a question is too complex to answer completely in 2 spoken sentences, give the key insight verbally and note that you have included more detail in the text chat above.
+- **Transcribed input is noisy.** Interpret charitably using context — never nitpick transcription glitches. But for emails, addresses, or unusual proper nouns, confirm by spelling them out letter-by-letter before acting (e.g., "That's n-i-m-i-t-s-h-a-h-two-five-zero-three at gmail dot com, correct?"). Never guess a spelling.
 </voice_mode>`;
 
 export function buildSystemPrompt(params: SystemPromptParams): string {
   const sections: string[] = [];
+
+  // Voice hard rule FIRST — attention is strongest at the top of the prompt.
+  // The full <voice_mode> block is appended at the end.
+  if (params.isVoice) {
+    sections.push(
+      "VOICE OUTPUT MODE ACTIVE: Your reply will be read ALOUD. Reply in 1-2 short spoken sentences, plain words only — absolutely no markdown, no asterisks/bold, no lists, no headings, no symbols, no URLs. Say everything in natural flowing words.",
+    );
+  }
 
   sections.push("# Nimits-Jarvis Agent");
 

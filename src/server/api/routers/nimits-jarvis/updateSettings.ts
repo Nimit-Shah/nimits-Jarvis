@@ -33,6 +33,10 @@ export const updateSettings = protectedProcedure
           ...(input.openRouterGatewayEnabled !== undefined && {
             openRouterGatewayEnabled: input.openRouterGatewayEnabled,
           }),
+          ...(input.sttModel && { sttModel: input.sttModel }),
+          ...(input.ttsProvider && { ttsProvider: input.ttsProvider }),
+          ...(input.ttsVoice && { ttsVoice: input.ttsVoice }),
+          ...(input.voiceStyle !== undefined && { voiceStyle: input.voiceStyle }),
         },
         select: {
           id: true,
@@ -40,6 +44,10 @@ export const updateSettings = protectedProcedure
           anthropicModel: true,
           piiRedactionEnabled: true,
           openRouterGatewayEnabled: true,
+          sttModel: true,
+          ttsProvider: true,
+          ttsVoice: true,
+          voiceStyle: true,
           updatedAt: true,
         },
       }),

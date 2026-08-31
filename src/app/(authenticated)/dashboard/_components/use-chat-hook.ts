@@ -25,7 +25,7 @@ export function useChatHook({
   const transport = useMemo(() => {
     return new DefaultChatTransport({
       api: "/api/chat",
-      prepareSendMessagesRequest: ({ messages, requestMetadata, body }) => ({
+      prepareSendMessagesRequest: ({ messages, body }) => ({
         body: {
           ...body,
           messages: messages.map((msg) => {
@@ -47,9 +47,11 @@ export function useChatHook({
           }),
           instanceId,
           chatId,
+          // isVoice rides the sendMessage options body (2nd arg), NOT message
+          // metadata — requestMetadata/message metadata never reached the
+          // server before, so VOICE_MODE_GUIDELINES never applied.
           isVoice:
-            (requestMetadata as { isVoice?: boolean } | undefined)?.isVoice ??
-            false,
+            (body as { isVoice?: boolean } | undefined)?.isVoice ?? false,
         },
       }),
       prepareReconnectToStreamRequest: () => ({
@@ -124,13 +126,13 @@ export function useChatHook({
 
   // Standard text-mode send — isVoice is always false.
   const sendMessage = useCallback((text: string) => {
-    void sendMessageRef.current({ text, metadata: { isVoice: false } });
+    void sendMessageRef.current({ text }, { body: { isVoice: false } });
   }, []);
 
-  // Voice-mode send — isVoice is always true. Use this from useJarvisVoice.
-  // Defined separately so there's no timing dependency on React state updates.
+  // Voice-mode send — isVoice is always true. Rides the sendMessage OPTIONS
+  // body (2nd arg) so prepareSendMessagesRequest's `body` spread picks it up.
   const sendVoiceMessage = useCallback((text: string) => {
-    void sendMessageRef.current({ text, metadata: { isVoice: true } });
+    void sendMessageRef.current({ text }, { body: { isVoice: true } });
   }, []);
 
   const stopRef = useRef(chat.stop);

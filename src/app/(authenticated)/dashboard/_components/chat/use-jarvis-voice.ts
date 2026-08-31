@@ -1,3 +1,9 @@
+/**
+ * @deprecated Old hook wired to full-screen overlay (IDLE→SPEAKING_GREETING→LISTENING→PROCESSING→SPEAKING_RESPONSE→IDLE).
+ * Kept per request — commented/deprecated. New Claude-exact session is use-voice-session.ts:
+ * auto-loop Listening→Speaking→Listening, barge-in, optimistic pill, streaming opacity
+ * (see frame_045.jpg:1, frame_100.jpg:1). Do not extend this file.
+ */
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
@@ -24,6 +30,10 @@ interface UseJarvisVoiceOptions {
   isAgentStreaming: boolean;
   latestAssistantText?: string;
   latestAssistantMessageId?: string;
+  instanceId?: string;
+  sttModel?: string;
+  ttsVoice?: string;
+  ttsProvider?: string;
 }
 
 interface UseJarvisVoiceReturn {
@@ -39,19 +49,21 @@ interface UseJarvisVoiceReturn {
   requestMicPermission: () => Promise<boolean>;
 }
 
-// ── macOS TTS via /api/tts ─────────────────────────────────────────────────────
+// ── Provider-aware TTS via /api/tts (fish-audio default, local-mac fallback) ─────
 
-function createMacTTS() {
+function createMacTTS(getVoiceConfig?: () => { voice?: string; provider?: string; instanceId?: string }) {
   let currentAudio: HTMLAudioElement | null = null;
   let currentUrl: string | null = null;
 
   async function speak(text: string): Promise<void> {
     stop(); // cancel any ongoing playback
+    const cfg = getVoiceConfig?.() ?? {};
+    const instanceQs = cfg.instanceId ? `?instanceId=${encodeURIComponent(cfg.instanceId)}` : "";
 
-    const res = await fetch("/api/tts", {
+    const res = await fetch(`/api/tts${instanceQs}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, voice: cfg.voice, provider: cfg.provider }),
     });
 
     if (!res.ok) {
@@ -111,6 +123,10 @@ export function useJarvisVoice({
   isAgentStreaming,
   latestAssistantText,
   latestAssistantMessageId,
+  instanceId,
+  sttModel,
+  ttsVoice,
+  ttsProvider,
 }: UseJarvisVoiceOptions): UseJarvisVoiceReturn {
   const [isVoiceModeOpen, setIsVoiceModeOpen] = useState(false);
   const [jarvisState, setJarvisState] = useState<JarvisVoiceState>("IDLE");
@@ -123,9 +139,13 @@ export function useJarvisVoice({
   const { permissionState: micPermission, requestPermission: requestMicPermission, errorMessage: micErrorMessage } =
     useMicPermission();
 
+  // Refs for voice config to avoid recreating TTS on every prop change
+  const ttsConfigRef = useRef({ instanceId, ttsVoice, ttsProvider });
+  useEffect(() => { ttsConfigRef.current = { instanceId, ttsVoice, ttsProvider }; }, [instanceId, ttsVoice, ttsProvider]);
+
   // Stable TTS instance
   const ttsRef = useRef<ReturnType<typeof createMacTTS> | null>(null);
-  if (!ttsRef.current) ttsRef.current = createMacTTS();
+  if (!ttsRef.current) ttsRef.current = createMacTTS(() => ttsConfigRef.current);
   const tts = ttsRef.current;
 
   // Track whether the component is still mounted
@@ -158,7 +178,7 @@ export function useJarvisVoice({
   );
 
   const { state: voiceInputState, volume, error: voiceError, startRecording, stopRecording } =
-    useVoiceInput({ onTranscribed: handleTranscribed });
+    useVoiceInput({ onTranscribed: handleTranscribed, sttModel, instanceId });
 
   // ── TTS: speak the agent's response sentence-by-sentence ──
   const spokenUpToRef = useRef(0);

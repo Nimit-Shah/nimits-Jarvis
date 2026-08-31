@@ -57,8 +57,24 @@ export const env = createEnv({
     OPENROUTER_API_KEY: z.string().optional(),
 
     // Whisper local STT (optional — voice mode disabled when missing)
+    // v1 default `small` for latency on 16GB M2. Validated against known
+    // whisper.cpp / WhisperKit (argmax) ids — note the underscore in
+    // `large-v3-v20240930_626MB` (a WhisperKit model identifier, not a size).
+    // Verify against the running server:
+    //   curl -F file=@sample.wav -F model=small $WHISPER_BASE_URL/v1/audio/transcriptions
     WHISPER_BASE_URL: z.string().url().default("http://127.0.0.1:8081"),
-    WHISPER_MODEL: z.string().default("large-v3-v20240930_626MB"),
+    WHISPER_MODEL: z
+      .string()
+      .regex(
+        /^(tiny|tiny\.en|base|base\.en|small|small\.en|medium|medium\.en|large-v3|large-v3-turbo|large-v3-v20240930_626MB|large-v3-v20240930_turbo)$/,
+        "Invalid WHISPER_MODEL id (must be a whisper.cpp size or WhisperKit argmax id)",
+      )
+      .default("small"),
+    // TTS via OpenRouter /api/v1/audio/speech — Fish S2.1 Pro Free is the free
+    // default (no separate Fish key needed; reuses OPENROUTER_API_KEY).
+    // "fish-audio" and "openrouter" are aliases of the same OpenRouter path.
+    TTS_PROVIDER: z.enum(["fish-audio", "openrouter", "local-mac", "piper"]).default("fish-audio"),
+    TTS_VOICE: z.string().default("s2.1-pro-free"),
     // Mnemosyne local sidecar
     MNEMOSYNE_URL: z.string().url().default("http://127.0.0.1:3999"),
   },
@@ -92,6 +108,8 @@ export const env = createEnv({
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
     WHISPER_BASE_URL: process.env.WHISPER_BASE_URL,
     WHISPER_MODEL: process.env.WHISPER_MODEL,
+    TTS_PROVIDER: process.env.TTS_PROVIDER,
+    TTS_VOICE: process.env.TTS_VOICE,
     MNEMOSYNE_URL: process.env.MNEMOSYNE_URL,
 
     // Client URL resolution:

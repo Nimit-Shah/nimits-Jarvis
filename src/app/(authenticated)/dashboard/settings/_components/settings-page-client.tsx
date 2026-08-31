@@ -8,6 +8,7 @@ import {
   Brain,
   AlertTriangle,
   Server,
+  Mic,
 } from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import Link from "next/link";
@@ -19,10 +20,11 @@ import { TelegramSettings } from "./telegram-settings";
 import { CronJobsSettings } from "./cron-jobs-settings";
 import { MemorySettings } from "./memory-settings";
 import { DangerZone } from "./danger-zone";
+import { VoiceSettings } from "./voice-settings";
 import { useInstanceId } from "~/hooks/use-instance-id";
 import { McpServersPanel } from "./mcp/mcp-servers-panel";
 
-type SettingsCategory = "security" | "telegram" | "cron" | "memory" | "mcp" | "danger";
+type SettingsCategory = "security" | "voice" | "telegram" | "cron" | "memory" | "mcp" | "danger";
 
 const CATEGORIES: Array<{
   id: SettingsCategory;
@@ -35,6 +37,12 @@ const CATEGORIES: Array<{
     label: "Security",
     icon: Shield,
     description: "PII protection and gateways",
+  },
+  {
+    id: "voice",
+    label: "Voice",
+    icon: Mic,
+    description: "STT & TTS — Fish Audio S1 Pro default",
   },
   {
     id: "telegram",
@@ -160,6 +168,18 @@ export function SettingsPageClient() {
                 piiRedactionEnabled={instance.piiRedactionEnabled}
                 openRouterGatewayEnabled={instance.openRouterGatewayEnabled}
                 defaultModel={instance.anthropicModel}
+              />
+            </ErrorBoundary>
+          )}
+
+          {activeCategory === "voice" && (
+            <ErrorBoundary>
+              <VoiceSettings
+                instanceId={instance.id}
+                sttModel={(instance as any).sttModel ?? "small"}
+                ttsProvider={(instance as any).ttsProvider ?? "fish-audio"}
+                ttsVoice={(instance as any).ttsVoice ?? "s2.1-pro-free"}
+                voiceStyle={(instance as any).voiceStyle ?? ""}
               />
             </ErrorBoundary>
           )}

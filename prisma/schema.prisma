@@ -125,6 +125,18 @@ model ComposioClawInstance {
   telegramLinkToken          String?   @unique
   telegramLinkTokenExpiresAt DateTime?
 
+  // Voice mode — STT/TTS are orthogonal (v1 local-only)
+  // STT: Whisper model id (tiny/base/small/medium/large-v3). Small default for latency on 16GB M2.
+  sttModel     String @default("small")
+  sttProvider  String @default("local") // local | openrouter (future)
+  // TTS: provider + voice id. Fish S2.1 Pro Free via OpenRouter (no separate key;
+  // reuses OPENROUTER_API_KEY) — low latency vs local piper.
+  ttsProvider String @default("fish-audio")
+  ttsVoice    String @default("s2.1-pro-free")
+  // Free-text voice style/steering prompt for Fish (e.g. "deep warm male, unhurried").
+  // Pinned per request so every synthesis uses the SAME voice take.
+  voiceStyle  String @default("")
+
   // Agent identity, stored as text
   soulPrompt      String?
   identityPrompt  String?
