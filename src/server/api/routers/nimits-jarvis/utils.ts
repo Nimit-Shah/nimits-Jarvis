@@ -13,6 +13,9 @@ export type InstanceLite = Pick<
   | "anthropicModel"
   | "createdAt"
   | "composioProjectId"
+  | "fsReadEnabled"
+  | "fsWriteAllowed"
+  | "fsRootPath"
 >;
 
 // ─── Instance Resolution ─────────────────────────────────────────────────────
@@ -40,6 +43,9 @@ export async function getInstanceForUser(
     anthropicModel: true,
     createdAt: true,
     composioProjectId: true,
+    fsReadEnabled: true,
+    fsWriteAllowed: true,
+    fsRootPath: true,
   } as const;
 
   if (instanceId) {

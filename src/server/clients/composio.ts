@@ -66,6 +66,39 @@ export function createComposioClientForInstance(decryptedApiKey?: string | null)
   });
 }
 
+// ── Phase A: deny overlapping Composio toolkits ─────────────────────────────
+// Composio's remote filetool/code-interpreter tools advertise file reading in
+// their descriptions; asked to read a local folder, the agent reaches for the
+// remote sandbox and reports that local files "aren't synced". One capability,
+// one enabled tool: local fs_* tools own local-file access, so remote
+// look-alikes are dropped before they ever reach the model.
+const COMPOSIO_DENIED_TOOL_PATTERNS: RegExp[] = [
+  /filetool/i,
+  /code.?interpret/i,
+  /filesystem/i,
+  /file.?tool/i,
+];
+
+function filterDeniedComposioTools(tools: ToolSet): ToolSet {
+  const filtered: ToolSet = {};
+  const dropped: string[] = [];
+  for (const [name, tool] of Object.entries(tools)) {
+    if (COMPOSIO_DENIED_TOOL_PATTERNS.some((re) => re.test(name))) {
+      dropped.push(name);
+      continue;
+    }
+    filtered[name] = tool;
+  }
+  if (dropped.length > 0) {
+    console.log(`[composio] deny-filter dropped ${dropped.length} overlapping tool(s): ${dropped.join(", ")}`);
+  } else {
+    // A permanent zero is a signal to investigate (pattern rot), not reassurance —
+    // the toolkit should ALSO be disabled on the Composio dashboard side.
+    console.log("[composio] deny-filter: 0 overlapping tools dropped (filetool/code-interpreter not in catalog)");
+  }
+  return filtered;
+}
+
 /**
  * Returns a cached { session, rawTools } bundle for `instanceId` (agent hot path
  * only). On hit, skips BOTH `composio.create()` and `session.tools()` network
@@ -88,7 +121,7 @@ export async function getOrCreateSessionAndTools(
       ...(config ? { manageConnections: config.manageConnections } : {}),
     });
     const rawTools = (await session.tools()) as ToolSet;
-    return { session, rawTools };
+    return { session, rawTools: filterDeniedComposioTools(rawTools) };
   })();
 
   // Deduplicate concurrent creation for the same instance.

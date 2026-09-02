@@ -32,6 +32,10 @@ export const updateSettingsInput = z.object({
   ttsVoice: z.string().min(1).max(100).optional(),
   // Free-text voice steering prompt for Fish (pins the same voice take per request)
   voiceStyle: z.string().max(300).optional(),
+  // File system access ceiling (Settings only — the per-message mode is not persisted)
+  fsReadEnabled: z.boolean().optional(),
+  fsWriteAllowed: z.boolean().optional(),
+  fsRootPath: z.string().max(500).nullable().optional(),
 });
 
 export type UpdateSettingsInput = z.infer<typeof updateSettingsInput>;

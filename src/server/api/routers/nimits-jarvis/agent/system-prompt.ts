@@ -13,6 +13,10 @@ interface SystemPromptParams {
   piiEnabled?: boolean;
   /** When true, the voice conversation mode guidelines are appended */
   isVoice?: boolean;
+  /** File system access ceiling (Phase A) — controls the ENVIRONMENT block */
+  fsReadEnabled?: boolean;
+  /** Effective per-message fs mode (already clamped by resolveFsMode) */
+  fsMode?: "read-only" | "full";
 }
 
 const DEFAULT_SOUL_PROMPT = `## Who You Are
@@ -104,10 +108,11 @@ Once connected, execute tools using MULTI_EXECUTE_TOOL.
 - **Route sub-tools through MULTI_EXECUTE_TOOL.** Specific actions discovered via SEARCH_TOOLS (e.g. COMPOSIO_SEARCH_SHOPPING, COMPOSIO_SEARCH_WEB, COMPOSIO_SEARCH_AMAZON, COMPOSIO_SEARCH_WALMART, COMPOSIO_SEARCH_FETCH_URL_CONTENT, BROWSER_TOOL_*, FIRECRAWL_*) are NOT directly callable. You MUST run them inside MULTI_EXECUTE_TOOL's \`tools\` array as {tool_slug, arguments}. Calling them directly is an error and wastes a turn.
 
 #### 4. Use Workbench for Complex Data (COMPOSIO_REMOTE_WORKBENCH)
-When tool results are large or need processing, use the workbench.
+When **Composio tool results** are large or need processing, use the workbench.
 - The workbench is a persistent Python sandbox - variables persist across calls
 - Use it to parse, filter, or transform large API responses
 - Use it to format data before presenting it to the user
+- **The workbench is a REMOTE sandbox — it cannot see the operator's local files. Never use it to read, list, or search local files, and never claim its contents are the operator's disk.**
 
 ### Common Patterns
 
@@ -273,6 +278,25 @@ export function buildSystemPrompt(params: SystemPromptParams): string {
   if (params.isVoice) {
     sections.push(
       "VOICE OUTPUT MODE ACTIVE: Your reply will be read ALOUD. Reply in 1-2 short spoken sentences, plain words only — absolutely no markdown, no asterisks/bold, no lists, no headings, no symbols, no URLs. Say everything in natural flowing words.",
+    );
+  }
+
+  // Machine boundary (Phase A) — description of the environment, not routing
+  // logic. Mode line reflects the effective (clamped) mode.
+  {
+    const fsOn = params.fsReadEnabled === true;
+    const modeLine = !fsOn
+      ? "FILE ACCESS: Off. You have no local file tools — say plainly that local file access is off and point the operator at the access dropdown to the left of the message box."
+      : params.fsMode === "full"
+        ? "FILE ACCESS: Read and write. Every change you propose is shown to the operator as a diff and applied only after they approve it, so propose changes directly rather than asking permission in prose. Prefer fs_edit over fs_write; fs_write is for new files only. Propose at most a few changes at a time so each diff stays reviewable."
+        : "FILE ACCESS: Read-only. You can list directories and read files. You cannot create, modify, or delete anything, and you cannot run scripts.";
+    sections.push(
+      `ENVIRONMENT
+You run on the operator's MacBook. Composio tools execute in a remote sandbox and cannot see the operator's local files — never use them to look for local files, and never describe that sandbox's contents as though it were the operator's disk.
+
+Local files are reachable only through the fs_* tools. If those tools are not in your toolset, say plainly that local file access is off and point the operator at the access dropdown to the left of the message box. Do not suggest uploading files to Google Drive, email, or any other service as a workaround — this system exists to keep the operator's files local.
+
+${modeLine}`,
     );
   }
 

@@ -29,6 +29,10 @@ const chatRequestBody = z.object({
   instanceId: z.string().optional(),
   chatId: z.string().optional(),
   isVoice: z.boolean().optional(),
+  // Per-message filesystem access mode — clamped server-side against the
+  // instance ceiling in prepareAgentRun (resolveFsMode). Unknown values are
+  // rejected, not coerced.
+  fsAccessMode: z.enum(["read-only", "full"]).optional(),
 });
 
 async function resolveChatId(instanceId: string, chatId?: string): Promise<string> {
@@ -247,6 +251,7 @@ export async function POST(request: Request) {
     userMessage: userText,
     source: "web",
     isVoice: body.data.isVoice ?? false,
+    fsAccessMode: body.data.fsAccessMode,
   });
 
   const { agent, messages, piiVault } = prepareResult.result;

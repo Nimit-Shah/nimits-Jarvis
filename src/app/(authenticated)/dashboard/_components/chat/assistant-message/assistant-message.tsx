@@ -22,6 +22,7 @@ import { PROSE_CLASSES } from "./prose-classes";
 import { MessageTimestamp } from "../message-timestamp";
 import { useChatContext } from "../../chat-context";
 import { formatToolName } from "~/components/ui/tool-calls-section-utils/tool-icons";
+import { FileChangeCard, isFsWriteToolPart } from "../file-change-card";
 
 type TextUIPart = { type: "text"; text: string };
 
@@ -120,7 +121,17 @@ export function AssistantMessage({ message, status }: AssistantMessageProps) {
       (s): s is Extract<MessageSegment, { kind: "tool-call" }> =>
         s.kind === "tool-call",
     )
-    .map((s) => s.part);
+    .map((s) => s.part)
+    // B1 auto-write: fs tools now auto-execute server-side (output-available),
+    // so only input-available pending approvals use the card. Output-available
+    // auto-writes render as generic "Used fs_write" with output.
+    .filter((p) => !(isFsWriteToolPart(p) && (p as { state?: string }).state === "input-available"));
+
+  // Approval cards — only for pending (input-available) write-tool calls
+  const fileChangeParts = segments
+    .filter((s): s is Extract<MessageSegment, { kind: "tool-call" }> => s.kind === "tool-call")
+    .map((s) => s.part)
+    .filter((p) => isFsWriteToolPart(p) && (p as { state?: string }).state === "input-available");
 
   const reasoningSegments = segments.filter(
     (s): s is Extract<MessageSegment, { kind: "reasoning" }> =>
@@ -149,6 +160,9 @@ export function AssistantMessage({ message, status }: AssistantMessageProps) {
         | Extract<MessageSegment, { kind: "reasoning" }>
         | Extract<MessageSegment, { kind: "tool-call" }> =>
         s.kind === "reasoning" || s.kind === "tool-call",
+    )
+    .filter(
+      (s) => s.kind !== "tool-call" || !(isFsWriteToolPart(s.part) && (s.part as { state?: string }).state === "input-available"),
     )
     .map((s) => {
       if (s.kind === "reasoning") {
@@ -200,6 +214,11 @@ export function AssistantMessage({ message, status }: AssistantMessageProps) {
           isStreaming={isRunning}
         />
       )}
+
+      {/* Phase B: filesystem write approval cards */}
+      {fileChangeParts.map((p) => (
+        <FileChangeCard key={p.toolCallId} part={p} />
+      ))}
 
       {/* Text content — always visible */}
       {textSegments.map((segment, idx) => {

@@ -62,6 +62,7 @@ ralph/results.log
 .claude/ralph.local.md
 
 docs/plans/*
+docs/*
 docs/state/*
 .claude/state/*
 
@@ -72,6 +73,7 @@ docs/state/*
 # playwright mcp
 .playwright-mcp/
 /*.png
+
 # Sentry Config File
 .env.sentry-build-plugin
 
@@ -92,4 +94,15 @@ graphify-out/
 .graphifyignore
 .agents/
 AGENTS.md
+
+# Phase A/B implementation elaborations — source specs handed to the implementing agent; not committed
+# All docs — not committed (per request: move .opencode/plans → docs + ignore all docs)
+docs/
+docs/PHASE_A_FS_ACCESS.md
+docs/PHASE_B_FS_WRITE.md
+docs/MCP_IMPLEMENTATION.md
+docs/chain-of-thought-and-search-fixes.md
+
+
+
 

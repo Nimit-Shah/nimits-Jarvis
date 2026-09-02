@@ -42,3 +42,11 @@ export type ReconstructedMessage =
       }>;
       providerOptions?: ProviderOptions;
     };
+
+/**
+ * Per-message filesystem access mode. NOT persisted — travels in the chat
+ * request body beside isVoice, is clamped server-side against the instance
+ * ceiling (fsWriteAllowed) and the message source, and resets to "read-only"
+ * on every new chat. See docs/PHASE_A_FS_ACCESS.md §2 and §5.
+ */
+export type FsAccessMode = "read-only" | "full";

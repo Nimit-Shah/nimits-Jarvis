@@ -63,8 +63,8 @@ export function ChatView() {
   }, [messages]);
 
   const handleSend = useCallback(
-    (text: string) => {
-      const result = sendMessage(text);
+    (text: string, fsAccessMode?: "read-only" | "full") => {
+      const result = sendMessage(text, fsAccessMode);
       requestAnimationFrame(() => {
         virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
       });
@@ -99,8 +99,13 @@ export function ChatView() {
   const latestAssistantMessageId = lastAssistantMessage?.id;
 
   const [instanceIdForVoice] = useInstanceId();
-  const { data: instanceData } = trpc.nimitsJarvis.getInstance.useQuery({ instanceId: instanceIdForVoice });
+  const { data: instanceData, isFetched: instanceFetched } = trpc.nimitsJarvis.getInstance.useQuery({ instanceId: instanceIdForVoice });
   const voiceInstance = instanceData?.instance as any;
+
+  // ── Filesystem access mode (Phase A) — per-message, never persisted ──
+  const [fsMode, setFsMode] = useState<"read-only" | "full">("read-only");
+  // Layer 2 rule: reset to read-only on every new chat.
+  useEffect(() => { setFsMode("read-only"); }, [chatId]);
 
   // --- Claude-exact inline voice session (scratch) — replaces old overlay hook ---
   const voice = useVoiceSession({
@@ -165,7 +170,7 @@ export function ChatView() {
               {showInlineVoice ? (
                 <InlineVoiceBar state={voice.state} volume={voice.volume} liveTranscript={voice.liveTranscript} error={voice.voiceError} onStop={handleVoiceStop} />
               ) : (
-                <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} />
+                <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} />
               )}
             </div>
           </div>
@@ -215,7 +220,7 @@ export function ChatView() {
             {showInlineVoice ? (
               <InlineVoiceBar state={voice.state} volume={voice.volume} liveTranscript={voice.liveTranscript} error={voice.voiceError} onStop={handleVoiceStop} />
             ) : (
-              <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} />
+              <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} />
             )}
           </>
         )}

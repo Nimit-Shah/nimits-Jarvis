@@ -8,9 +8,10 @@ import { Textarea } from "~/components/ui/textarea";
 import { cn } from "~/lib/utils";
 import { showErrorToast } from "~/components/core/toast-notifications";
 import { ModelSelector } from "./model-selector";
+import { FsAccessMenu } from "./fs-access-menu";
 
 interface ChatInputProps {
-  onSend: (message: string) => void;
+  onSend: (message: string, fsAccessMode?: "read-only" | "full") => void;
   onStop: () => void;
   status: ChatStatus;
   chatId: string;
@@ -19,11 +20,18 @@ interface ChatInputProps {
     whisperAvailable: boolean;
     onOpenVoiceMode: () => void;
   };
+  /** Filesystem access mode + ceiling (Phase A) */
+  fsAccess?: {
+    mode: "read-only" | "full";
+    onModeChange: (mode: "read-only" | "full") => void;
+    fsWriteAllowed?: boolean;
+    instanceResolved?: boolean;
+  };
 }
 
 const MAX_MESSAGE_LENGTH = 50_000;
 
-export function ChatInput({ onSend, onStop, status, chatId, voice }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, status, chatId, voice, fsAccess }: ChatInputProps) {
   const [input, setInput] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -41,9 +49,9 @@ export function ChatInput({ onSend, onStop, status, chatId, voice }: ChatInputPr
 
   const handleSubmit = useCallback(() => {
     if (!canSend) return;
-    onSend(input.trim());
+    onSend(input.trim(), fsAccess?.mode);
     setInput("");
-  }, [canSend, input, onSend]);
+  }, [canSend, input, onSend, fsAccess?.mode]);
 
   const handleStop = useCallback(() => {
     onStop();
@@ -110,7 +118,15 @@ export function ChatInput({ onSend, onStop, status, chatId, voice }: ChatInputPr
 
           <div className="flex items-center justify-between pt-2 px-1">
             <div className="flex items-center">
-              {/* Left side actions (e.g. + button) can go here later */}
+              {/* FS access dropdown — left slot, beside the (future) attachment button */}
+              {fsAccess && (
+                <FsAccessMenu
+                  mode={fsAccess.mode}
+                  onModeChange={fsAccess.onModeChange}
+                  fsWriteAllowed={fsAccess.fsWriteAllowed}
+                  instanceResolved={fsAccess.instanceResolved ?? true}
+                />
+              )}
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2">

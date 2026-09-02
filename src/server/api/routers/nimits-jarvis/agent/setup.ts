@@ -47,7 +47,7 @@ function extractReasoningGloss(text: string): string | undefined {
 }
 import { stripToolResultEchoes } from "./strip-tool-echoes";
 import { clearStreamingMessage } from "~/server/clients/redis";
-import type { ReconstructedMessage } from "./types";
+import type { ReconstructedMessage, FsAccessMode } from "./types";
 import { getModelProvider, isAnthropicModel, buildLLM } from "./model-utils";
 import { optimizeToolSchemas } from "./tool-optimizer";
 import {
@@ -59,6 +59,23 @@ import {
 
 type MessageSource = "web" | "telegram" | "cron";
 
+export type { FsAccessMode };
+
+/**
+ * The clamp is the security boundary. The requested mode comes from the client
+ * (never trusted); telegram/cron are unattended (no human to confirm) and are
+ * therefore always read-only regardless of what was requested.
+ */
+export function resolveFsMode(
+  requested: FsAccessMode | undefined,
+  source: MessageSource,
+  instance: { fsWriteAllowed: boolean },
+): FsAccessMode {
+  if (source !== "web") return "read-only";
+  if (requested === "full" && instance.fsWriteAllowed) return "full";
+  return "read-only";
+}
+
 /**
  * Wraps every tool's execute function to:
  * 1. Sanitize return values (replace lone Unicode surrogates with U+FFFD).
@@ -68,11 +85,25 @@ type MessageSource = "web" | "telegram" | "cron";
  * malformed Unicode that produces invalid JSON, and PII that should not
  * reach external LLMs.
  */
+interface WrapToolOptions {
+  /**
+   * Tools whose ARGUMENTS must NOT have PII tokens restored. Phase B: fs_write
+   * and fs_edit receive content — a model emitting [CLAW_EMAIL_A1B2] inside
+   * newText would have the real address substituted and written to disk in
+   * plaintext. Every existing PII layer guards data flowing TO the model; this
+   * guards data flowing TO DISK. The diff shown to the operator can still
+   * display real values (presentation layer only).
+   */
+  noArgumentRestore?: Set<string>;
+}
+
 function wrapToolExecutors(
   tools: ToolSet,
   vault: PIIVault | null,
   restoreCache: Map<string, unknown>,
+  options?: WrapToolOptions,
 ): ToolSet {
+  const noRestore = options?.noArgumentRestore ?? new Set<string>();
   const wrapped: ToolSet = {};
   for (const [name, tool] of Object.entries(tools)) {
     if (!tool.execute) {
@@ -89,14 +120,18 @@ function wrapToolExecutors(
         // After restore, deep-strip any residual (orphan) token the vault
         // could not resolve — otherwise it would be persisted verbatim by
         // durable tools (memory_save, Mnemosyne) and re-leak forever.
+        // EXCEPT for write tools (noArgumentRestore): the token must reach
+        // disk as the token, never the real value.
         const [input] = args;
         // The AI SDK passes a toolCallId inside the execution options (args[1]).
         const options = args[1] as { toolCallId?: string } | undefined;
         const tid = options?.toolCallId;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-        const restoredInput = deepStripResidualTokens(
-          vault ? vault.restoreDeep(input) : input,
-        );
+        const restoredInput = noRestore.has(name)
+          ? input
+          : deepStripResidualTokens(
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+              vault ? vault.restoreDeep(input) : input,
+            );
         // Cache the restored (real) input ONCE so DB persistence + any UI
         // re-render reads the exact same value the third-party tool saw.
         if (vault && tid) {
@@ -220,6 +255,7 @@ interface PrepareAgentRunParams {
   source: MessageSource;
   userMessageType?: "hidden";
   isVoice?: boolean;
+  fsAccessMode?: FsAccessMode; // defaults to "read-only" via resolveFsMode when absent
 }
 
 interface PrepareAgentRunResult {
@@ -234,7 +270,7 @@ type PrepareResult = { status: "ready"; result: PrepareAgentRunResult };
 export async function prepareAgentRun(
   params: PrepareAgentRunParams,
 ): Promise<PrepareResult> {
-  const { instanceId, chatId, userMessage, source, userMessageType, isVoice } =
+  const { instanceId, chatId, userMessage, source, userMessageType, isVoice, fsAccessMode } =
     params;
   const t0 = performance.now();
   const mark = (label: string) => {
@@ -286,6 +322,15 @@ export async function prepareAgentRun(
   const isOllama = provider === "ollama";
   const useAnthropicOptions = isAnthropicModel(chat.model);
 
+  // ── File system access mode (Phase A) ──
+  // Resolve ONCE, after the instance row is loaded and before tool assembly.
+  // The instance row type includes the new columns via getInstanceForUser's
+  // model, so this compiles once W1's schema fields exist.
+  const fsMode = resolveFsMode(fsAccessMode, source, instance);
+  console.log(
+    `[fs] effective mode — instance=${instanceId} chat=${chatId} source=${source} requested=${fsAccessMode ?? "unset"} effective=${fsMode}`,
+  );
+
   // Create a PII vault for non-local models to redact sensitive data
   // before it reaches the external LLM. Local Ollama models are exempt
   // since data stays on-device. Users can disable via Settings.
@@ -334,6 +379,8 @@ export async function prepareAgentRun(
       isOllama,
       piiEnabled: !!piiVault,
       isVoice: isVoice ?? false,
+      fsReadEnabled: instance.fsReadEnabled,
+      fsMode,
     }),
   );
 
@@ -434,7 +481,11 @@ export async function prepareAgentRun(
   // MCP goes before optimize so its schemas are also trimmed; customTools stay raw.
   const optimized = optimizeToolSchemas({ ...rawComposioTools, ...rawMcpTools });
 
-  const customTools = createCustomTools(instanceId, chatId, userTimezone);
+  const customTools = createCustomTools(instanceId, chatId, userTimezone, {
+    fsReadEnabled: instance.fsReadEnabled,
+    fsMode,
+    fsRoot: instance.fsRootPath,
+  });
 
   // Per-request cache of restored (real) tool-call inputs/outputs, keyed by
   // toolCallId (prefixed with "out:" for outputs). Ensures restoreDeep() is
@@ -450,6 +501,8 @@ export async function prepareAgentRun(
     { ...optimized, ...customTools },
     piiVault,
     restoreCache,
+    // fs_write/fs_edit carry content — never restore PII tokens into disk writes
+    { noArgumentRestore: new Set(["fs_write", "fs_edit"]) },
   );
 
   // Pre-create assistant message row so we can update it in onFinish

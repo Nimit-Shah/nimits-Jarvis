@@ -1,5 +1,12 @@
 /** @type {import('next').NextConfig} */
 const config = {
+  // Only pin tracing root for production builds: the parent directory has a
+  // stray pnpm-lock.yaml that makes `next build` scan /Users/ayunimusmac
+  // (including .Trash → EPERM). For `next dev --turbo` the same pin triggers
+  // "Next.js package not found" panic, so keep dev on default inference.
+  ...(process.env.NODE_ENV === "production"
+    ? { outputFileTracingRoot: "/Users/ayunimusmac/nimits-jarvis" }
+    : {}),
   reactStrictMode: true,
   skipTrailingSlashRedirect: true,
 

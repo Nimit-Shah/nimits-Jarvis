@@ -82,7 +82,12 @@ export async function runMemoryFlush(
         ? piiVault ?? new PIIVault()
         : null;
 
-    const allCustomTools = createCustomTools(instanceId);
+    // Memory flush never exposes fs tools (unattended path, read-only ceiling)
+    const allCustomTools = createCustomTools(instanceId, chatId, "UTC", {
+      fsReadEnabled: false,
+      fsMode: "read-only",
+      fsRoot: null,
+    });
     // Wrap both memory tools so any PII token in their inputs is restored to a
     // real value before persistence/query (see wrapFlushTool above).
     const memoryTools = {

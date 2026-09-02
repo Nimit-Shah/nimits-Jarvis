@@ -4,6 +4,7 @@ import { type Metadata } from "next";
 import { Fira_Code, Oxanium } from "next/font/google";
 import { Toaster } from "sonner";
 import { TRPCReactProvider } from "~/clients/trpc";
+import { AppThemeProvider } from "~/components/core/app-theme-provider";
 import { ThemeProvider } from "~/components/core/theme-provider";
 
 const primary = Oxanium({
@@ -29,14 +30,29 @@ export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${primary.variable} ${code.variable}`} suppressHydrationWarning>
+    <html
+      lang="en"
+      className={`${primary.variable} ${code.variable}`}
+      suppressHydrationWarning
+    >
+      <head>
+        {/* Pre-hydration: apply persisted app theme before paint to avoid FOUC */}
+        {/* eslint-disable-next-line @next/next/no-before-interactive-script-outside-document */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem('jarvis-theme');if(t==='zen-linen'||t==='solar-dusk')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','solar-dusk');}catch(e){}})()`,
+          }}
+        />
+      </head>
       <body className="bg-background min-h-screen font-sans antialiased">
         <ThemeProvider>
-          <TRPCReactProvider>
-            {children}
-            <Toaster />
-            <div id="dialog-portal" />
-          </TRPCReactProvider>
+          <AppThemeProvider>
+            <TRPCReactProvider>
+              {children}
+              <Toaster />
+              <div id="dialog-portal" />
+            </TRPCReactProvider>
+          </AppThemeProvider>
         </ThemeProvider>
       </body>
     </html>

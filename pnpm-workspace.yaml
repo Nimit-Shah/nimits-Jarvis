@@ -1,0 +1,12 @@
+# pnpm v10+ reads build-script approvals from this file (package.json "pnpm" field is ignored).
+# Kept project-local so the stray parent workspace (~) can never hijack installs again.
+packages: []
+onlyBuiltDependencies:
+  - '@prisma/engines'
+  - '@prisma/client'
+  - prisma
+  - sharp
+  - unrs-resolver
+  - onnxruntime-node
+  - esbuild
+  - protobufjs

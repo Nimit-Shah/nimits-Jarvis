@@ -9,6 +9,8 @@ import {
   AlertTriangle,
   Server,
   Mic,
+  FolderOpen,
+  Palette,
 } from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import Link from "next/link";
@@ -21,10 +23,12 @@ import { CronJobsSettings } from "./cron-jobs-settings";
 import { MemorySettings } from "./memory-settings";
 import { DangerZone } from "./danger-zone";
 import { VoiceSettings } from "./voice-settings";
+import { FsSettings } from "./fs-settings";
+import { ThemeSettings } from "./theme-settings";
 import { useInstanceId } from "~/hooks/use-instance-id";
 import { McpServersPanel } from "./mcp/mcp-servers-panel";
 
-type SettingsCategory = "security" | "voice" | "telegram" | "cron" | "memory" | "mcp" | "danger";
+type SettingsCategory = "security" | "appearance" | "voice" | "files" | "telegram" | "cron" | "memory" | "mcp" | "danger";
 
 const CATEGORIES: Array<{
   id: SettingsCategory;
@@ -39,10 +43,22 @@ const CATEGORIES: Array<{
     description: "PII protection and gateways",
   },
   {
+    id: "appearance",
+    label: "Themes",
+    icon: Palette,
+    description: "Solar Dusk & Zen Linen — with Save & reload",
+  },
+  {
     id: "voice",
     label: "Voice",
     icon: Mic,
     description: "STT & TTS — Fish Audio S1 Pro default",
+  },
+  {
+    id: "files",
+    label: "Files",
+    icon: FolderOpen,
+    description: "Local file access ceiling",
   },
   {
     id: "telegram",
@@ -172,6 +188,12 @@ export function SettingsPageClient() {
             </ErrorBoundary>
           )}
 
+          {activeCategory === "appearance" && (
+            <ErrorBoundary>
+              <ThemeSettings />
+            </ErrorBoundary>
+          )}
+
           {activeCategory === "voice" && (
             <ErrorBoundary>
               <VoiceSettings
@@ -211,6 +233,17 @@ export function SettingsPageClient() {
           {activeCategory === "mcp" && (
             <ErrorBoundary>
               <McpServersPanel instanceId={instance.id} />
+            </ErrorBoundary>
+          )}
+
+          {activeCategory === "files" && (
+            <ErrorBoundary>
+              <FsSettings
+                instanceId={instance.id}
+                fsReadEnabled={(instance as any).fsReadEnabled ?? true}
+                fsWriteAllowed={(instance as any).fsWriteAllowed ?? false}
+                fsRootPath={(instance as any).fsRootPath ?? null}
+              />
             </ErrorBoundary>
           )}
 

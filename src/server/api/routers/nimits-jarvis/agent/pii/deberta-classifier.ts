@@ -90,6 +90,7 @@ let classifierInstance: any = null;
 let consecutiveFailures = 0;
 let lastFailureTime = 0;
 let circuitLogged = false;
+let lastLoadError: string | null = null; // underlying cause surfaced in circuit-open logs
 
 /**
  * Lazy-load the DeBERTa model. Caches the instance after first load.
@@ -107,7 +108,7 @@ async function getClassifier(): Promise<any> {
         console.error(
           `[DeBERTa] ⛔ CIRCUIT OPEN — ${consecutiveFailures} consecutive failures. ` +
             `PII Layer 3 (ML) is DOWN and will be skipped for the next ${Math.ceil((RETRY_COOLDOWN_MS - elapsed) / 1000)}s. ` +
-            `Falling back to regex+identity only. Check model connectivity/cache.`,
+            `Falling back to regex+identity only. Underlying cause: ${lastLoadError ?? "unknown"} `,
         );
         circuitLogged = true;
       }
@@ -142,6 +143,7 @@ async function getClassifier(): Promise<any> {
   } catch (err) {
     consecutiveFailures++;
     lastFailureTime = Date.now();
+    lastLoadError = `${(err as NodeJS.ErrnoException).code ?? ""} ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`.trim();
     console.error(
       `[DeBERTa] ⛔ MODEL LOAD FAILED (attempt ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}). ` +
         `PII Layer 3 (ML) is NOT running — falling back to regex+identity only.`,

@@ -52,6 +52,11 @@ When cloud models are used, sensitive identity data is tokenized and shielded be
 - **Telegram Bot:** Full bidirectional messaging with typing indicators, tool execution status updates, and automatic error handling.
 - **Whisper Voice Mode:** Local speech-to-text with interactive audio orb visualization.
 
+### 📁 Local File Access (Phase A read / Phase B write)
+- **Read tools (`fs_list`, `fs_read`):** gated by a per-project ceiling (Settings → Files) plus a per-message mode in the composer dropdown. All paths pass a realpath→containment→deny-list boundary (`src/server/lib/fs-access/paths.ts`).
+- **Write tools (`fs_edit`, `fs_write`, `fs_delete`, `fs_mkdir`, `fs_move`):** every change stops at a human-reviewed approval card bound to a content digest (TOCTOU-safe), written atomically with an undo journal (7-day retention).
+- **macOS privacy note:** TCC privacy grants attach to the **terminal application that launches the server**, not to Jarvis itself. Grant **Full Disk Access** to that terminal in System Settings → Privacy & Security, and always launch from the same terminal — switching from iTerm to Terminal.app (or an IDE shell) means a fresh grant and silent `EPERM` until it is given.
+
 ---
 
 ## 🏗 System Architecture

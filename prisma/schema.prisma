@@ -137,6 +137,11 @@ model ComposioClawInstance {
   // Pinned per request so every synthesis uses the SAME voice take.
   voiceStyle  String @default("")
 
+  // File system access (Phase A read-only)
+  fsReadEnabled  Boolean @default(true)   // may this project read local files at all
+  fsWriteAllowed Boolean @default(false)  // ceiling for Phase B writes; Settings only
+  fsRootPath     String?                  // optional root override; null means os.homedir()
+
   // Agent identity, stored as text
   soulPrompt      String?
   identityPrompt  String?
@@ -152,6 +157,7 @@ model ComposioClawInstance {
   memories   Memory[]
   cronJobs   CronJob[]
   mcpServers McpServer[]
+  fileChanges FileChange[]
 
   @@index([userId])
   @@index([userId, createdAt])
@@ -218,6 +224,7 @@ model Chat {
   instance ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   messages Message[]
   cronJobs CronJob[]
+  fileChanges FileChange[]
 
   @@index([instanceId, updatedAt])
   @@map("composio_claw_chat")
@@ -279,6 +286,43 @@ model CronJob {
 
   @@index([instanceId, nextRunAt])
   @@map("composio_claw_cron_job")
+}
+
+// Phase B: per-change approval journal for filesystem writes.
+// One row per proposed change; status lifecycle: pending → applied | rejected |
+// stale | failed | undone. sha256Before binds the approval (TOCTOU guard).
+model FileChange {
+  id           String    @id @default(cuid())
+  instanceId   String
+  chatId       String
+  messageId    String? // backfilled opportunistically at execute; nullable by design
+  toolCallId   String    @unique // ties the row to the streamed tool call
+
+  op           String // edit | write | delete | mkdir | move
+  path         String // realpathed absolute target
+  toPath       String? // move only
+
+  sha256Before String? // null when creating a new file
+  sha256After  String? // computed at pre-flight, verified after write
+  bytesBefore  Int?
+  bytesAfter   Int?
+  diff         String?   @db.Text // unified diff, truncated for display
+
+  status       String    @default("pending")
+  rejectReason String?
+  error        String?
+  backupPath   String? // journal copy, for undo
+
+  approvedAt DateTime?
+  appliedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  instance ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  chat     Chat                 @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@index([chatId, createdAt])
+  @@index([instanceId, status])
+  @@map("composio_claw_file_change")
 }
 
 model OnboardingState {

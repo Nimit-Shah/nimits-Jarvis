@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import { useChat } from "@ai-sdk/react";
 import type { UIMessage } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, lastAssistantMessageIsCompleteWithToolCalls } from "ai";
 import { trpc } from "~/clients/trpc";
 import { useInstanceId } from "~/hooks/use-instance-id";
 import { showErrorToast } from "~/components/core/toast-notifications";
@@ -52,6 +52,11 @@ export function useChatHook({
           // server before, so VOICE_MODE_GUIDELINES never applied.
           isVoice:
             (body as { isVoice?: boolean } | undefined)?.isVoice ?? false,
+          // Per-message filesystem access mode — same transport as isVoice.
+          // Clamped server-side; see agent/setup.ts resolveFsMode.
+          fsAccessMode:
+            (body as { fsAccessMode?: "read-only" | "full" } | undefined)
+              ?.fsAccessMode ?? "read-only",
         },
       }),
       prepareReconnectToStreamRequest: () => ({
@@ -64,6 +69,7 @@ export function useChatHook({
     id: `chat-${chatId}`,
     transport,
     resume: streamId !== null,
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
     onFinish: () => {
       void utils.nimitsJarvis.getHistory.invalidate();
       void utils.chats.list.invalidate();
@@ -124,10 +130,16 @@ export function useChatHook({
   const sendMessageRef = useRef(chat.sendMessage);
   sendMessageRef.current = chat.sendMessage;
 
-  // Standard text-mode send — isVoice is always false.
-  const sendMessage = useCallback((text: string) => {
-    void sendMessageRef.current({ text }, { body: { isVoice: false } });
-  }, []);
+  // Standard text-mode send — isVoice always false, fs mode passed through.
+  const sendMessage = useCallback(
+    (text: string, fsAccessMode?: "read-only" | "full") => {
+      void sendMessageRef.current(
+        { text },
+        { body: { isVoice: false, fsAccessMode } },
+      );
+    },
+    [],
+  );
 
   // Voice-mode send — isVoice is always true. Rides the sendMessage OPTIONS
   // body (2nd arg) so prepareSendMessagesRequest's `body` spread picks it up.
@@ -142,10 +154,25 @@ export function useChatHook({
     void stopRef.current();
   }, []);
 
+  // Approval-card flow (Phase B): supply a tool result for a no-execute tool
+  // (fs_edit/fs_write/…) after the operator clicks Approve/Reject. Stable ref
+  // so the card can call it without prop-drilling through every message.
+  const addToolOutputRef = useRef(chat.addToolOutput);
+  addToolOutputRef.current = chat.addToolOutput;
+  const addToolOutput = useCallback(
+    (
+      args: Parameters<typeof chat.addToolOutput>[0],
+    ): ReturnType<typeof chat.addToolOutput> => {
+      return addToolOutputRef.current(args);
+    },
+    [],
+  );
+
   return {
     sendMessage,
     sendVoiceMessage,
     stop: stableStop,
+    addToolOutput,
     // Return initialMessages until seeded to avoid flash of empty state
     messages: isSeeded ? stampedMessages : initialMessages,
     status: chat.status,
