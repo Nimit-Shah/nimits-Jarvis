@@ -245,4 +245,4 @@ program
   .description("List all cron jobs with their status")
   .action(listCronJobs);
 
-program.parseAsync();
+void program.parseAsync();

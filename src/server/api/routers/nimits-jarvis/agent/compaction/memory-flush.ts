@@ -87,6 +87,9 @@ export async function runMemoryFlush(
       fsReadEnabled: false,
       fsMode: "read-only",
       fsRoot: null,
+      instanceId,
+      chatId,
+      changeBudget: { remaining: 0 },
     });
     // Wrap both memory tools so any PII token in their inputs is restored to a
     // real value before persistence/query (see wrapFlushTool above).

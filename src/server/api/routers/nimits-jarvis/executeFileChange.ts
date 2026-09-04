@@ -223,6 +223,7 @@ async function findAssistantMessageId(chatId: string): Promise<string | null> {
 
 function sha256Buffer(buf: Buffer): string {
   // Local import avoided at top level to keep diff.ts the single source
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- intentional lazy require
   const { createHash } = require("node:crypto") as typeof import("node:crypto");
   return createHash("sha256").update(buf).digest("hex");
 }

@@ -3,7 +3,11 @@ import { zodSchema } from "ai";
 import type { Tool } from "ai";
 import { readdir, lstat } from "node:fs/promises";
 import { join } from "node:path";
-import { resolveSafePath } from "~/server/lib/fs-access/paths";
+import {
+  isDeniedByName,
+  mapErrno,
+  resolveSafePath,
+} from "~/server/lib/fs-access/paths";
 
 export const fsListSchema = z.object({
   path: z.string().describe("Absolute path or ~/relative path to a directory"),
@@ -23,54 +27,104 @@ interface FsEntry {
   modifiedAt: string;
 }
 
+/** Shared entry budget across root + children so `limit` is a real total cap. */
+type Budget = { remaining: number; dirsVisited: number };
+
+interface ListOneResult {
+  entries: FsEntry[];
+  truncated: boolean;
+  totalSeen: number;
+  skippedDenied: number;
+  skippedHidden: number;
+  error?: { code: string; message: string };
+}
+
 /** Depth-1/2 listing of one directory. Never throws — returns mapped errors. */
 async function listOne(
   dir: string,
-  opts: { includeHidden: boolean; limit: number; fsRoot: string | null },
-): Promise<{ entries: FsEntry[]; truncated: boolean; totalSeen: number; skippedDenied: number }> {
+  opts: {
+    includeHidden: boolean;
+    fsRoot: string | null;
+    budget: Budget;
+  },
+): Promise<ListOneResult> {
   const entries: FsEntry[] = [];
-  let totalSeen = 0;
-  let skippedDenied = 0;
   let truncated = false;
+  let skippedDenied = 0;
+  let skippedHidden = 0;
+
+  opts.budget.dirsVisited++;
 
   let names: string[];
   try {
-    names = await import("node:fs/promises").then((fs) => fs.readdir(dir));
-  } catch {
-    return { entries, truncated, totalSeen, skippedDenied };
+    names = await readdir(dir);
+  } catch (err) {
+    // A TCC-blocked directory and an empty directory must NOT look the same
+    // to the model — surface the mapped errno so it can report the cause.
+    const mapped = mapErrno(err, dir);
+    if (!mapped.ok) {
+      return {
+        entries,
+        truncated,
+        totalSeen: 0,
+        skippedDenied,
+        skippedHidden,
+        error: { code: mapped.code, message: mapped.message },
+      };
+    }
+    return { entries, truncated, totalSeen: 0, skippedDenied, skippedHidden };
   }
 
+  // Real directory size, NOT names-iterated-before-break — a truncated
+  // listing that reports 307 for a far larger dir misleads the model into
+  // thinking it saw everything.
+  const totalSeen = names.length;
+
   for (const name of names) {
-    totalSeen++;
-    if (!opts.includeHidden && name.startsWith(".")) continue;
-
-    const full = join(dir, name);
-    // resolveSafePath realpaths the entry (following symlinks) and applies the
-    // deny-list to the resolved result. Denied entries are skipped silently and
-    // only counted — listing their names would leak that credentials exist.
-    const resolved = await resolveSafePath(full, opts.fsRoot);
-    if (!resolved.ok) {
-      if (resolved.code === "DENIED_PATH") skippedDenied++;
-      continue;
-    }
-    try {
-      const st = await lstat(full);
-      const type = st.isSymbolicLink() ? "symlink" : st.isDirectory() ? "dir" : st.isFile() ? "file" : "other";
-      const entry: FsEntry = {
-        name,
-        type,
-        modifiedAt: st.mtime.toISOString(),
-      };
-      if (type === "file") entry.sizeBytes = st.size;
-      entries.push(entry);
-    } catch {
-      // lstat failure (TCC/EPERM on the entry itself) — skip silently
-    }
-
-    if (entries.length >= opts.limit) {
+    if (opts.budget.remaining <= 0) {
       truncated = true;
       break;
     }
+    if (!opts.includeHidden && name.startsWith(".")) {
+      skippedHidden++;
+      continue;
+    }
+
+    const full = join(dir, name);
+    let st;
+    try {
+      st = await lstat(full);
+    } catch {
+      // lstat failure (TCC/EPERM on the entry itself) — skip silently
+      continue;
+    }
+
+    const isLink = st.isSymbolicLink();
+    // Non-symlink child of a realpathed parent cannot escape containment, so
+    // a cheap string-only deny check is equivalent to resolveSafePath there.
+    // Only symlinks need real resolution (they can point anywhere).
+    if (isLink) {
+      const resolved = await resolveSafePath(full, opts.fsRoot);
+      if (!resolved.ok) {
+        if (resolved.code === "DENIED_PATH") skippedDenied++;
+        continue;
+      }
+    } else if (isDeniedByName(full, opts.fsRoot)) {
+      // Denied entries are skipped silently and only counted — listing their
+      // names would leak that credentials exist.
+      skippedDenied++;
+      continue;
+    }
+
+    const type = isLink ? "symlink" : st.isDirectory() ? "dir" : st.isFile() ? "file" : "other";
+    const entry: FsEntry = {
+      name,
+      type,
+      modifiedAt: st.mtime.toISOString(),
+    };
+    if (type === "file") entry.sizeBytes = st.size;
+    entries.push(entry);
+    opts.budget.remaining--;
   }
 
   // Deterministic: directories first, then files, alphabetical within group
@@ -80,7 +134,7 @@ async function listOne(
     return a.name.localeCompare(b.name);
   });
 
-  return { entries, truncated, totalSeen, skippedDenied };
+  return { entries, truncated, totalSeen, skippedDenied, skippedHidden };
 }
 
 export function createFsListTool(fs: FsToolOptions): Tool<FsListInput, Record<string, unknown>> {
@@ -93,25 +147,45 @@ export function createFsListTool(fs: FsToolOptions): Tool<FsListInput, Record<st
         return { error: { code: resolved.code, message: resolved.message } };
       }
 
-      const rootListing = await listOne(resolved.path, { includeHidden, limit, fsRoot: fs.fsRoot });
+      const budget: Budget = { remaining: limit, dirsVisited: 0 };
+      const rootListing = await listOne(resolved.path, { includeHidden, fsRoot: fs.fsRoot, budget });
       const result: Record<string, unknown> = {
         path: resolved.path,
         entries: rootListing.entries,
         truncated: rootListing.truncated,
         totalSeen: rootListing.totalSeen,
         skippedDenied: rootListing.skippedDenied,
+        skippedHidden: rootListing.skippedHidden,
+        budgetExhausted: rootListing.truncated,
+        ...(rootListing.error ? { error: rootListing.error } : {}),
       };
 
-      // Depth 2: one extra level of subdirectory expansion (hard-capped at 2)
-      if (depth >= 2 && !rootListing.truncated) {
-        const subdirs = rootListing.entries.filter((e) => e.type === "dir").slice(0, 25);
+      // Depth 2: one extra level of subdirectory expansion (hard-capped at 2).
+      // The shared budget makes `limit` a total cap across root + children.
+      if (
+        depth >= 2 &&
+        !rootListing.truncated &&
+        budget.remaining > 0
+      ) {
+        const subdirs = rootListing.entries.filter((e) => e.type === "dir");
         const children: Record<string, unknown> = {};
         for (const sd of subdirs) {
-          const sub = await listOne(join(resolved.path, sd.name), { includeHidden, limit: 50, fsRoot: fs.fsRoot });
+          if (budget.remaining <= 0) {
+            result.budgetExhausted = true;
+            break;
+          }
+          const sub = await listOne(join(resolved.path, sd.name), {
+            includeHidden,
+            fsRoot: fs.fsRoot,
+            budget,
+          });
+          if (sub.truncated) result.budgetExhausted = true;
           children[sd.name] = {
             entries: sub.entries,
             truncated: sub.truncated,
             skippedDenied: sub.skippedDenied,
+            skippedHidden: sub.skippedHidden,
+            ...(sub.error ? { error: sub.error } : {}),
           };
         }
         result.children = children;

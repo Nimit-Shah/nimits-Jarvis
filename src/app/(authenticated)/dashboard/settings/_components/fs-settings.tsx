@@ -69,6 +69,7 @@ export function FsSettings({
               </Label>
               <p className="text-muted-foreground text-xs leading-relaxed">
                 Lets the agent list directories and read files on your Mac. Off removes the file tools entirely.
+                File and folder names are sent to the model as-is. File contents are still redacted for cloud models.
               </p>
             </div>
           </div>

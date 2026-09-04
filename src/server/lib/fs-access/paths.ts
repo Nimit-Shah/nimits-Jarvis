@@ -30,8 +30,13 @@ export type SafePath =
   | { ok: false; code: PathErrorCode; message: string };
 
 // Any path segment equal to one of these is refused.
+// Build/dependency/vcs noise first (node_modules, .git, ...) — listing or
+// searching them wastes thousands of entries and syscalls. Also: an unbounded
+// walk of a home directory is only tractable because these are denied.
 const DENY_SEGMENTS = new Set([
   ".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", "Keychains",
+  "node_modules", ".git", "__pycache__", ".venv", ".next",
+  ".pnpm-store", ".Trash", "dist", "build",
 ]);
 
 // Exact file names refused anywhere in the tree.
@@ -43,13 +48,11 @@ const DENY_BASENAMES = new Set([
 const DENY_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".keychain", ".keychain-db"];
 
 // Home-relative subtrees refused wholesale.
+// Library as a whole tree is deliberate: TCC databases, speech transcripts,
+// accountd records — no user-facing task needs the agent browsing there.
+// (If ever needed, add an explicit allowSystemPaths arg gated on full mode.)
 const DENY_SUBPATHS = [
-  "Library/Keychains",
-  "Library/Cookies",
-  "Library/Safari",
-  "Library/Application Support/Google/Chrome",
-  "Library/Application Support/Firefox",
-  "Library/Application Support/NimitsJarvis",
+  "Library",
   ".config/gh",
   ".config/gcloud",
   ".local/share/keyrings",
@@ -91,6 +94,18 @@ function isDenied(real: string, root: string): boolean {
   if (DENY_EXTENSIONS.some((e) => lower.endsWith(e))) return true;
   if (rel && DENY_SUBPATHS.some((d) => rel === d || rel.startsWith(d + sep))) return true;
   return false;
+}
+
+/**
+ * Cheap string-only deny check for a path the caller already knows is inside
+ * the realpathed root and is NOT a symlink — the parent having been
+ * realpathed, a non-symlink child cannot escape containment, so the full
+ * resolveSafePath (realpath syscalls) is unnecessary for listing/searching.
+ * Apply the deny-list to the literal path; identical result to isDenied()
+ * because realpath(full) === full for a non-symlink child of a real parent.
+ */
+export function isDeniedByName(abs: string, rootOverride?: string | null): boolean {
+  return isDenied(abs, expandTilde(rootOverride?.trim() || homedir()));
 }
 
 /** Map a filesystem error to a SafePath failure with an operator-actionable message. */
@@ -164,7 +179,7 @@ export async function resolveSafePath(
     return {
       ok: false,
       code: "DENIED_PATH",
-      message: "That location holds credentials and is permanently blocked.",
+      message: "That location is permanently blocked (credentials or system data).",
     };
   }
   return { ok: true, path: real };

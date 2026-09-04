@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -85,6 +85,10 @@ export async function scheduleJournalGc(): Promise<void> {
         // no sentinel yet — proceed
       }
       await mkdir(JOURNAL_ROOT, { recursive: true });
+      // utimes only stamps an EXISTING file — it cannot create the sentinel.
+      // Without seeding it here, the first GC run (and every one after, since
+      // nothing else writes this file) fails with ENOENT and GC never runs.
+      await writeFile(sentinel, "").catch(() => {});
       await utimes(sentinel, new Date(), new Date());
 
       const { db } = await import("~/server/clients/db");

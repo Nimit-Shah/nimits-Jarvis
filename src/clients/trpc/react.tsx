@@ -7,7 +7,11 @@ import { type inferRouterInputs, type inferRouterOutputs } from "@trpc/server";
 import { useState } from "react";
 import SuperJSON from "superjson";
 
-import { type AppRouter } from "~/server/api/root";
+// Full-statement `import type` (NOT inline `{ type X }`): with
+// verbatimModuleSyntax, Turbopack preserves inline type imports as runtime
+// module edges, which pulled the entire server router tree (db/pg, redis,
+// crypto) into the client bundle and failed the build on `server-only`.
+import type { AppRouter } from "~/server/api/root";
 import { createQueryClient } from "./query-client";
 import { getBaseUrl } from "./shared";
 

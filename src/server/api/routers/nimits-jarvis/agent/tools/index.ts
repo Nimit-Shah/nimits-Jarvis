@@ -3,6 +3,7 @@ import { createMemorySearchTool } from "./memory-search";
 import { createScheduleTool } from "./schedule";
 import { createFsListTool } from "./fs/list";
 import { createFsReadTool } from "./fs/read";
+import { createFsFindTool } from "./fs/find";
 import { createFsEditTool } from "./fs/edit";
 import { createFsWriteTool } from "./fs/write";
 import { createFsDeleteTool } from "./fs/delete";
@@ -19,6 +20,10 @@ export interface FsToolOptions {
   fsReadEnabled: boolean;
   fsMode: FsAccessMode; // already clamped by resolveFsMode
   fsRoot: string | null; // instance.fsRootPath; null means os.homedir()
+  instanceId: string;
+  chatId: string;
+  /** Per-message auto-write budget (blast-radius). Mutated by each fs write tool. */
+  changeBudget: { remaining: number };
 }
 
 export function createCustomTools(
@@ -34,7 +39,11 @@ export function createCustomTools(
     // Availability filtering — absent from the toolset when disabled, never
     // rejected at runtime. A tool the model cannot see cannot be called.
     ...(fs?.fsReadEnabled
-      ? { fs_list: createFsListTool(fs), fs_read: createFsReadTool(fs) }
+      ? {
+          fs_list: createFsListTool(fs),
+          fs_find: createFsFindTool(fs),
+          fs_read: createFsReadTool(fs),
+        }
       : {}),
     // B1 auto-write: when Full System Access is selected, writes execute
     // immediately (no card, no approval blocking). Whole home scope minus

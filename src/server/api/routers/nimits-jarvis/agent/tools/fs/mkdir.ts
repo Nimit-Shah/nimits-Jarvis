@@ -1,13 +1,15 @@
 import { z } from "zod";
 import { mkdir, stat } from "node:fs/promises";
 import { zodSchema } from "ai";
-import type { Tool } from "ai";
+import type { Tool, ToolExecutionOptions } from "ai";
 import { resolveWritePath } from "~/server/lib/fs-access/write-paths";
+import { journalAppliedChange } from "~/server/lib/fs-access/apply-write";
+import { MAX_AUTO_WRITES_PER_MESSAGE } from "~/server/lib/fs-access/write-paths";
 import type { FsToolOptions } from "../index";
 
 /**
  * fs_mkdir — creates ONE directory, non-recursive.
- * B1: auto-executes when Full is selected.
+ * B1: auto-executes when Full is selected. Journaled to FileChange audit log.
  */
 export const fsMkdirSchema = z.object({
   path: z.string().describe("Absolute path or ~/relative path for the new directory (parent must already exist)"),
@@ -19,11 +21,32 @@ export function createFsMkdirTool(fs: FsToolOptions): Tool<FsMkdirInput, Record<
   return {
     description: "Create a single directory on the operator's Mac (parent must already exist — no recursive creation). Requires Full System Access.",
     inputSchema: zodSchema(fsMkdirSchema),
-    execute: async ({ path }) => {
+    execute: async ({ path }, options?: ToolExecutionOptions) => {
       const resolved = await resolveWritePath(path, fs.fsRoot, { op: "mkdir" });
       if (!resolved.ok) return { error: { code: resolved.error.code, message: resolved.error.message } };
+
+      if (fs.changeBudget.remaining <= 0) {
+        return {
+          error: {
+            code: "CHANGE_BUDGET_EXCEEDED",
+            message: `At most ${MAX_AUTO_WRITES_PER_MESSAGE} file change(s) per message. Further changes require a new message.`,
+          },
+        };
+      }
+
       try {
         await mkdir(resolved.path);
+        fs.changeBudget.remaining -= 1;
+        await journalAppliedChange({
+          instanceId: fs.instanceId,
+          chatId: fs.chatId,
+          toolCallId: options?.toolCallId ?? "",
+          op: "mkdir",
+          path: resolved.path,
+          before: null,
+          after: null,
+          backup: null,
+        });
         return { op: "mkdir", path: resolved.path, status: "applied" };
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;

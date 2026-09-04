@@ -36,8 +36,6 @@ export function ToolkitCard({ toolkit, instanceId }: ToolkitCardProps) {
     onError: trpcToastOnError,
   });
 
-  const isConnected = toolkit.connected || toolkit.noAuth;
-
   const handleConnect = async (e: React.MouseEvent) => {
     e.stopPropagation();
     try {
@@ -45,7 +43,13 @@ export function ToolkitCard({ toolkit, instanceId }: ToolkitCardProps) {
         instanceId,
         toolkit: toolkit.slug,
       });
-      router.push(redirectUrl);
+      if (redirectUrl) {
+        router.push(redirectUrl);
+      } else {
+        // No-auth toolkit (Composio code 4326): nothing to OAuth, already usable
+        showSuccessToast(`${toolkit.name} is ready — no authentication needed`);
+        void utils.toolkits.getToolkits.invalidate();
+      }
     } catch {
       // trpcToastOnError handles toast
     }
@@ -81,7 +85,7 @@ export function ToolkitCard({ toolkit, instanceId }: ToolkitCardProps) {
       </div>
 
       {/* Action button */}
-      {isConnected ? (
+      {toolkit.connected ? (
         <Button
           variant="outline"
           size="sm"
@@ -95,6 +99,10 @@ export function ToolkitCard({ toolkit, instanceId }: ToolkitCardProps) {
             "Disconnect"
           )}
         </Button>
+      ) : toolkit.noAuth ? (
+        <span className="shrink-0 px-1 text-[10px] text-muted-foreground">
+          No auth needed
+        </span>
       ) : (
         <Button
           size="sm"

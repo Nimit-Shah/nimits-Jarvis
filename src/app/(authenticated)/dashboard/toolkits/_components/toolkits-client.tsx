@@ -64,11 +64,17 @@ export function ToolkitsClient() {
 
   const handleConnect = async (slug: string) => {
     try {
-      const { redirectUrl } = await getAuthLink.mutateAsync({
-        instanceId,
-        toolkit: slug,
-      });
+const { redirectUrl } = await getAuthLink.mutateAsync({
+      instanceId,
+      toolkit: slug,
+    });
+    if (redirectUrl) {
       window.open(redirectUrl, "_blank");
+    } else {
+      // No-auth toolkit (Composio code 4326): nothing to OAuth, already usable
+      showSuccessToast("Ready — no authentication needed");
+      void utils.toolkits.getToolkits.invalidate();
+    }
     } catch {
       // toast handles it
     }
@@ -227,6 +233,7 @@ interface ToolkitTileProps {
     name: string;
     logo: string;
     connected: boolean;
+    noAuth: boolean;
     connectionId: string | null;
   };
   onConnect: () => void;
@@ -242,11 +249,12 @@ function ToolkitTile({
   isConnecting,
   isDisconnecting,
 }: ToolkitTileProps) {
+  const isConnected = toolkit.connected || toolkit.noAuth;
   return (
     <div
       className={cn(
         "group flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-all",
-        toolkit.connected
+        isConnected
           ? "border-primary/20 bg-primary/5"
           : "border-border/40 bg-card/50 hover:border-border hover:bg-card",
       )}
@@ -278,6 +286,10 @@ function ToolkitTile({
         >
           Disconnect
         </Button>
+      ) : toolkit.noAuth ? (
+        <span className="shrink-0 px-1 text-[10px] text-muted-foreground">
+          No auth needed
+        </span>
       ) : (
         <Button
           size="sm"

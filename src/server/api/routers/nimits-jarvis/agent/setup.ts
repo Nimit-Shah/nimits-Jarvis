@@ -47,6 +47,7 @@ function extractReasoningGloss(text: string): string | undefined {
 }
 import { stripToolResultEchoes } from "./strip-tool-echoes";
 import { clearStreamingMessage } from "~/server/clients/redis";
+import { MAX_AUTO_WRITES_PER_MESSAGE } from "~/server/lib/fs-access/write-paths";
 import type { ReconstructedMessage, FsAccessMode } from "./types";
 import { getModelProvider, isAnthropicModel, buildLLM } from "./model-utils";
 import { optimizeToolSchemas } from "./tool-optimizer";
@@ -95,6 +96,22 @@ interface WrapToolOptions {
    * display real values (presentation layer only).
    */
   noArgumentRestore?: Set<string>;
+  /**
+   * Tools whose results are pure filesystem structure (paths, names, sizes).
+   * Results skip PII scanning/redaction entirely and return as-is — no tokens
+   * are registered and no text is rewritten. Coherent with local file access:
+   * file/folder NAMES reach the model unredacted by explicit product decision.
+   * fs_read CONTENT is NOT exempt — see piiScanFieldsByTool.
+   */
+  piiStructuralTools?: Set<string>;
+  /**
+   * Per-tool field-scoped PII scanning. Only the listed top-level fields are
+   * scanned and redacted (e.g. fs_read's `content` — a file can contain real
+   * emails); every other field passes through untouched. Keeps layer-2 redaction
+   * covering the half of fs output that can hold real PII while skipping
+   * structural noise (line counts, byte sizes) that would seed false positives.
+   */
+  piiScanFieldsByTool?: Record<string, string[]>;
 }
 
 function wrapToolExecutors(
@@ -124,8 +141,8 @@ function wrapToolExecutors(
         // disk as the token, never the real value.
         const [input] = args;
         // The AI SDK passes a toolCallId inside the execution options (args[1]).
-        const options = args[1] as { toolCallId?: string } | undefined;
-        const tid = options?.toolCallId;
+        const execOptions = args[1] as { toolCallId?: string } | undefined;
+        const tid = execOptions?.toolCallId;
         const restoredInput = noRestore.has(name)
           ? input
           : deepStripResidualTokens(
@@ -160,9 +177,40 @@ function wrapToolExecutors(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
         const sanitized = deepSanitize(result);
 
-        // If a PII vault is active, extract structured PII from known
-        // fields (names, emails in JSON) then redact all string values.
         if (vault) {
+          // Structural tools (fs_list, fs_find, ...): pure filesystem metadata —
+          // no scanning, no redaction. Names/sizes pass through as-is.
+          if (options?.piiStructuralTools?.has(name)) {
+            if (tid) {
+              restoreCache.set(`out:${tid}`, sanitized);
+            }
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+            return sanitized;
+          }
+
+          // Field-scoped scan (fs_read): scan and redact ONLY the listed
+          // top-level fields (e.g. `content`), splice back into the untouched
+          // result. Everything else (path, sizes) passes through unredacted.
+          const scanFields = options?.piiScanFieldsByTool?.[name];
+          if (scanFields && scanFields.length > 0) {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            const scoped = { ...(sanitized as Record<string, unknown>) };
+            for (const field of scanFields) {
+              const value = scoped[field];
+              if (typeof value === "string" && value.length > 0) {
+                vault.registerStructuredPII({ [field]: value });
+                scoped[field] = await vault.redact(value);
+              }
+            }
+            if (tid) {
+              restoreCache.set(`out:${tid}`, sanitized);
+            }
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+            return scoped;
+          }
+
+          // Default: extract structured PII from known fields (names, emails
+          // in JSON) then redact all string values.
           vault.registerStructuredPII(sanitized);
           // Cache the REAL (pre-redaction) result once, keyed by tool call id,
           // so DB persistence reads the same value instead of re-restoring the
@@ -485,6 +533,10 @@ export async function prepareAgentRun(
     fsReadEnabled: instance.fsReadEnabled,
     fsMode,
     fsRoot: instance.fsRootPath,
+    instanceId,
+    chatId,
+    // Blast-radius budget for auto-writes (B1). One logical change per message.
+    changeBudget: { remaining: MAX_AUTO_WRITES_PER_MESSAGE },
   });
 
   // Per-request cache of restored (real) tool-call inputs/outputs, keyed by
@@ -501,8 +553,20 @@ export async function prepareAgentRun(
     { ...optimized, ...customTools },
     piiVault,
     restoreCache,
-    // fs_write/fs_edit carry content — never restore PII tokens into disk writes
-    { noArgumentRestore: new Set(["fs_write", "fs_edit"]) },
+    {
+      // fs_write/fs_edit carry content — never restore PII tokens into disk writes
+      noArgumentRestore: new Set(["fs_write", "fs_edit"]),
+      // Results are pure filesystem structure — no scanning, no redaction.
+      piiStructuralTools: new Set([
+        "fs_list",
+        "fs_find",
+        "fs_mkdir",
+        "fs_move",
+        "fs_delete",
+      ]),
+      // Scan only these fields; everything else passes through untouched.
+      piiScanFieldsByTool: { fs_read: ["content"] },
+    },
   );
 
   // Pre-create assistant message row so we can update it in onFinish
@@ -563,6 +627,22 @@ export async function prepareAgentRun(
         ollama: { think: false },
       },
       maxTokens: 512,
+    }),
+    // Reasoning budget per step (OpenRouter only): step 0 plans the task,
+    // every later step just picks the next directory/tool and doesn't need
+    // 200 words of deliberation. Also raise the output ceiling — with
+    // provider defaults, reasoning consumed the whole token budget and
+    // truncated answers (finishReason "length" at 1000 completion / 1000
+    // reasoning tokens).
+    ...(provider === "openrouter" && {
+      maxOutputTokens: 2_000,
+      prepareStep: ({ stepNumber }) => ({
+        providerOptions: {
+          openrouter: {
+            reasoning: { effort: stepNumber === 0 ? "medium" : "low" },
+          },
+        },
+      }),
     }),
     onFinish: async (result) => {
       await clearStreamingMessage(chatId).catch((error) =>

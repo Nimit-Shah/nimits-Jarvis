@@ -35,7 +35,7 @@ async function main() {
   writeFileSync(join(root, ".env"), "SECRET=1");
   writeFileSync(join(root, "secret.pem"), "PRIVATE KEY MATERIAL");
 
-  const opts = { fsReadEnabled: true, fsMode: "read-only" as const, fsRoot: root as string | null };
+  const opts = { fsReadEnabled: true, fsMode: "read-only" as const, fsRoot: root as string | null, instanceId: "inst", chatId: "chat", changeBudget: { remaining: 0 } };
 
   console.log("fs_list");
   const tools = createCustomTools("inst", "chat", "UTC", opts);
@@ -60,7 +60,7 @@ async function main() {
   check("directory read → NOT_A_FILE + suggests fs_list", dirRead.error?.code === "NOT_A_FILE" && /fs_list/.test(dirRead.error.message), JSON.stringify(dirRead));
 
   // tools absent when disabled (availability filtering, not runtime rejection)
-  const noFs = createCustomTools("inst", "chat", "UTC", { fsReadEnabled: false, fsMode: "read-only", fsRoot: null });
+  const noFs = createCustomTools("inst", "chat", "UTC", { fsReadEnabled: false, fsMode: "read-only", fsRoot: null, instanceId: "inst", chatId: "chat", changeBudget: { remaining: 0 } });
   check("fs tools ABSENT when fsReadEnabled=false", !(noFs as any).fs_list && !(noFs as any).fs_read && !!(noFs as any).memory_save);
 
   // ── PII inheritance proof: fs_read wrapped by wrapToolExecutors tokenizes emails ──

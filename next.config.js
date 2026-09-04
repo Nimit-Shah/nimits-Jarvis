@@ -104,10 +104,6 @@ const config = {
   typescript: {
     ignoreBuildErrors: false,
   },
-
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
 };
 
 export default config;

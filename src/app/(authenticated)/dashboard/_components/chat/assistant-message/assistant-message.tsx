@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Copy, Check } from "lucide-react";
@@ -22,9 +22,35 @@ import { PROSE_CLASSES } from "./prose-classes";
 import { MessageTimestamp } from "../message-timestamp";
 import { useChatContext } from "../../chat-context";
 import { formatToolName } from "~/components/ui/tool-calls-section-utils/tool-icons";
-import { FileChangeCard, isFsWriteToolPart } from "../file-change-card";
 
 type TextUIPart = { type: "text"; text: string };
+
+/**
+ * assistant-message re-renders on EVERY SSE chunk; re-parsing the full markdown
+ * tree per chunk is the other half of the streaming jank. Snapshot `parts` at
+ * most every `intervalMs` so the parse cost is bounded to ~10 renders/s during
+ * streaming, while the final update still flushes.
+ */
+function useThrottledParts<T>(value: T, intervalMs = 100): T {
+  const [snapshot, setSnapshot] = useState(value);
+  const lastUpdate = useRef(0);
+
+  useEffect(() => {
+    const elapsed = Date.now() - lastUpdate.current;
+    if (elapsed >= intervalMs) {
+      lastUpdate.current = Date.now();
+      setSnapshot(value);
+      return;
+    }
+    const timer = setTimeout(() => {
+      lastUpdate.current = Date.now();
+      setSnapshot(value);
+    }, intervalMs - elapsed);
+    return () => clearTimeout(timer);
+  }, [value, intervalMs]);
+
+  return snapshot;
+}
 
 function mapToToolCallEntry(
   part: DynamicToolUIPart | ToolUIPart,
@@ -113,64 +139,71 @@ export function AssistantMessage({ message, status }: AssistantMessageProps) {
     };
   }, []);
 
-  const segments = segmentParts(message.parts);
+  const throttledParts = useThrottledParts(message.parts);
+  const segments = useMemo(() => segmentParts(throttledParts), [throttledParts]);
 
   // Extract tool calls and reasoning in order
-  const toolCalls = segments
-    .filter(
-      (s): s is Extract<MessageSegment, { kind: "tool-call" }> =>
-        s.kind === "tool-call",
-    )
-    .map((s) => s.part)
-    // B1 auto-write: fs tools now auto-execute server-side (output-available),
-    // so only input-available pending approvals use the card. Output-available
-    // auto-writes render as generic "Used fs_write" with output.
-    .filter((p) => !(isFsWriteToolPart(p) && (p as { state?: string }).state === "input-available"));
-
-  // Approval cards — only for pending (input-available) write-tool calls
-  const fileChangeParts = segments
-    .filter((s): s is Extract<MessageSegment, { kind: "tool-call" }> => s.kind === "tool-call")
-    .map((s) => s.part)
-    .filter((p) => isFsWriteToolPart(p) && (p as { state?: string }).state === "input-available");
-
-  const reasoningSegments = segments.filter(
-    (s): s is Extract<MessageSegment, { kind: "reasoning" }> =>
-      s.kind === "reasoning",
+  const toolCalls = useMemo(
+    () =>
+      segments
+        .filter(
+          (s): s is Extract<MessageSegment, { kind: "tool-call" }> =>
+            s.kind === "tool-call",
+        )
+        .map((s) => s.part),
+    [segments],
   );
 
-  const textSegments = segments.filter(
-    (s): s is Extract<MessageSegment, { kind: "text" }> => s.kind === "text",
+  const reasoningSegments = useMemo(
+    () =>
+      segments.filter(
+        (s): s is Extract<MessageSegment, { kind: "reasoning" }> =>
+          s.kind === "reasoning",
+      ),
+    [segments],
+  );
+
+  const textSegments = useMemo(
+    () =>
+      segments.filter(
+        (s): s is Extract<MessageSegment, { kind: "text" }> => s.kind === "text",
+      ),
+    [segments],
   );
 
   const isRunning = status === "streaming" || status === "submitted";
 
   // Build ordered chain of reasoning + tool calls for hierarchy display
-  const reasoningTexts = reasoningSegments.map((s) => s.part.text);
+  const reasoningTexts = useMemo(
+    () => reasoningSegments.map((s) => s.part.text),
+    [reasoningSegments],
+  );
 
   // Create interleaved items for proper ordering
   type ChainItem =
     | { type: "reasoning"; text: string; gloss?: string }
     | { type: "tool-call"; entry: ToolCallEntry };
 
-  const chainItems: ChainItem[] = segments
-    .filter(
-      (
-        s,
-      ): s is
-        | Extract<MessageSegment, { kind: "reasoning" }>
-        | Extract<MessageSegment, { kind: "tool-call" }> =>
-        s.kind === "reasoning" || s.kind === "tool-call",
-    )
-    .filter(
-      (s) => s.kind !== "tool-call" || !(isFsWriteToolPart(s.part) && (s.part as { state?: string }).state === "input-available"),
-    )
-    .map((s) => {
-      if (s.kind === "reasoning") {
-        const gloss = (s.part as unknown as { gloss?: string }).gloss;
-        return { type: "reasoning" as const, text: s.part.text, gloss };
-      }
-      return { type: "tool-call" as const, entry: mapToToolCallEntry(s.part) };
-    });
+  const chainItems: ChainItem[] = useMemo(
+    () =>
+      segments
+        .filter(
+          (
+            s,
+          ): s is
+            | Extract<MessageSegment, { kind: "reasoning" }>
+            | Extract<MessageSegment, { kind: "tool-call" }> =>
+            s.kind === "reasoning" || s.kind === "tool-call",
+        )
+        .map((s) => {
+          if (s.kind === "reasoning") {
+            const gloss = (s.part as unknown as { gloss?: string }).gloss;
+            return { type: "reasoning" as const, text: s.part.text, gloss };
+          }
+          return { type: "tool-call" as const, entry: mapToToolCallEntry(s.part) };
+        }),
+    [segments],
+  );
 
   const getFullTextContent = () =>
     textSegments
@@ -214,11 +247,6 @@ export function AssistantMessage({ message, status }: AssistantMessageProps) {
           isStreaming={isRunning}
         />
       )}
-
-      {/* Phase B: filesystem write approval cards */}
-      {fileChangeParts.map((p) => (
-        <FileChangeCard key={p.toolCallId} part={p} />
-      ))}
 
       {/* Text content — always visible */}
       {textSegments.map((segment, idx) => {

@@ -46,7 +46,14 @@ const WRITE_DENY_ANYWHERE = [
 const SYSTEM_PREFIXES = ["/System", "/Library", "/usr", "/bin", "/sbin", "/opt"];
 
 export const MAX_WRITE_BYTES = 1_000_000; // 1 MB per operation
-export const MAX_CHANGES_PER_MESSAGE = 1;
+/**
+ * Blast-radius limit per assistant message: at most this many fs write tools
+ * may apply in one turn. Originally (Phase B) this capped the size of the
+ * approval-card queue; the card is gone, but the cap stays as a runaway-loop
+ * brake — without it a buggy loop could rewrite dozens of files before the
+ * operator notices. One logical change per message is the deliberate ceiling.
+ */
+export const MAX_AUTO_WRITES_PER_MESSAGE = 1;
 
 /** Repo root at startup — the agent must not edit the application running it. */
 const REPO_ROOT = process.cwd();
