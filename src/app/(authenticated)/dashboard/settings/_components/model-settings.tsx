@@ -1,12 +1,11 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { Shield, Cpu, Loader2, ChevronsUpDown, Check } from "lucide-react";
+import { Shield, Cpu, Loader2, ChevronsUpDown, Check, RefreshCw } from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "~/components/ui/card";
@@ -21,6 +20,8 @@ import {
 import { Input } from "~/components/ui/input";
 import { cn } from "~/lib/utils";
 import {
+  showErrorToast,
+  showInfoToast,
   showSuccessToast,
   trpcToastOnError,
 } from "~/components/core/toast-notifications";
@@ -57,7 +58,7 @@ export function ModelSettings({
     onError: trpcToastOnError,
   });
 
-  const { allModels, grouped, groupedKeys, isLoading } = useModelCatalog(
+  const { allModels, grouped, groupedKeys, isLoading, refresh, isRefreshing } = useModelCatalog(
     defaultModel,
     instanceId,
   );
@@ -103,10 +104,10 @@ export function ModelSettings({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Security Settings</CardTitle>
-        <CardDescription>
-          Manage data privacy and protection layers
-        </CardDescription>
+        <CardTitle className="flex items-center gap-2">
+          <Shield className="size-4" />
+          Security & Models
+        </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         {/* PII Protection Toggle */}
@@ -122,10 +123,7 @@ export function ModelSettings({
                   PII Protection
                 </Label>
                 <p className="text-muted-foreground text-xs leading-relaxed">
-                  When enabled, sensitive data (emails, phone numbers, names)
-                  from your connected services is redacted before being sent to
-                  external AI models and restored in the response. Local models
-                  are always exempt.
+                  Redact sensitive personal data before sending prompts to external AI models.
                 </p>
               </div>
             </div>
@@ -155,8 +153,7 @@ export function ModelSettings({
                 OpenRouter Gateway
               </Label>
               <p className="text-muted-foreground text-xs leading-relaxed">
-                Enable models routed through OpenRouter (provides access to
-                thousands of open-source and proprietary models).
+                Route prompts through OpenRouter for cloud model access.
               </p>
             </div>
             <Switch
@@ -176,17 +173,38 @@ export function ModelSettings({
 
         {/* Default Model */}
         <div className="mt-2 border-t pt-4">
-          <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Cpu className="text-primary mt-0.5 h-5 w-5 shrink-0" />
               <Label htmlFor="default-model" className="text-sm font-semibold">
                 Default Model
               </Label>
             </div>
-            <p className="text-muted-foreground text-xs leading-relaxed">
-              The model new chats use by default. You can still switch models
-              per chat from the chat input.
-            </p>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0"
+              title="Refresh models — rescan local endpoints and the cloud catalog"
+              aria-label="Refresh models"
+              onClick={() => {
+                void refresh()
+                  .then((res) => {
+                    if (!res.ok) {
+                      showErrorToast("Something went wrong");
+                    } else if (res.updated) {
+                      showSuccessToast("Local models refreshed");
+                    } else {
+                      showInfoToast("Local models are already up to date");
+                    }
+                  })
+                  .catch(() => {
+                    showErrorToast("Something went wrong");
+                  });
+              }}
+              disabled={isRefreshing || updateSettings.isPending}
+            >
+              <RefreshCw className={cn("size-3.5", isRefreshing && "animate-spin")} />
+            </Button>
           </div>
 
           <Popover open={modelOpen} onOpenChange={setModelOpen}>

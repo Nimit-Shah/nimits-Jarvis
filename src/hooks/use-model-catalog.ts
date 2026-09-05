@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { trpc } from "~/clients/trpc";
 import { useInstanceId } from "~/hooks/use-instance-id";
 
@@ -33,12 +33,41 @@ export function useModelCatalog(
   const instanceId = explicitInstanceId ?? urlInstanceId;
   const { data: instance, isLoading: isInstanceLoading } =
     trpc.nimitsJarvis.getInstance.useQuery({ instanceId });
-  const { data: openRouterModels, isLoading: isLoadingOpenRouter } =
+  const { data: openRouterModels, isLoading: isLoadingOpenRouter, refetch: refetchOpenRouterModels } =
     trpc.nimitsJarvis.getOpenRouterModels.useQuery();
-  const { data: localModels, isLoading: isLoadingLocal } =
+  const { data: localModels, isLoading: isLoadingLocal, refetch: refetchLocalModels } =
     trpc.nimitsJarvis.getLocalModels.useQuery();
 
   const isLoading = isLoadingOpenRouter || isLoadingLocal || isInstanceLoading;
+
+  // Manual rescan of live model sources (Ollama /api/tags + OpenRouter catalog).
+  // Backs the "Refresh models" button in settings — refetch bypasses the
+  // react-query cache so newly pulled local models appear immediately, and
+  // every dropdown sharing this cache (settings + per-chat selector) updates.
+  //
+  // Result semantics: `ok` is false on transport failure, or when a rescan
+  // wipes a previously non-empty local list (the server answers [] when
+  // Ollama is unreachable, so that shape means the scan itself failed).
+  // `updated` compares local model ids before/after.
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const refresh = useCallback(async (): Promise<{ ok: boolean; updated: boolean }> => {
+    setIsRefreshing(true);
+    try {
+      const before = JSON.stringify((localModels ?? []).map((m) => m.id).sort());
+      const [localRes, remoteRes] = await Promise.all([
+        refetchLocalModels(),
+        refetchOpenRouterModels(),
+      ]);
+      if (localRes.error || remoteRes.error) return { ok: false, updated: false };
+      const afterIds = (localRes.data ?? []).map((m) => m.id).sort();
+      if (afterIds.length === 0 && before !== "[]") return { ok: false, updated: false };
+      return { ok: true, updated: JSON.stringify(afterIds) !== before };
+    } catch {
+      return { ok: false, updated: false };
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [localModels, refetchLocalModels, refetchOpenRouterModels]);
 
   const allModels = useMemo(() => {
     const list: CatalogModel[] = [];
@@ -113,5 +142,5 @@ export function useModelCatalog(
     });
   }, [grouped]);
 
-  return { allModels, grouped, groupedKeys, isLoading };
+  return { allModels, grouped, groupedKeys, isLoading, refresh, isRefreshing };
 }

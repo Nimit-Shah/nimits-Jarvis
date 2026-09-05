@@ -1,35 +1,31 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Palette, Save } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { Label } from "~/components/ui/label";
-import { Button } from "~/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { useState } from "react";
+import { Check, Palette } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { APP_THEMES, useAppTheme, type AppTheme } from "~/components/core/app-theme-provider";
 import { showSuccessToast } from "~/components/core/toast-notifications";
+import { cn } from "~/lib/utils";
+
+/**
+ * Fixed preview tokens per theme (mirrors src/styles/globals.css).
+ * Kept local so each swatch renders in its own palette regardless of the
+ * currently active theme.
+ */
+const THEME_SWATCHES: Record<AppTheme, { bg: string; sidebar: string; primary: string; text: string }> = {
+  "solar-dusk": { bg: "#FDFBF7", sidebar: "#F1E9DA", primary: "#B45309", text: "#4A3B33" },
+  "zen-linen": { bg: "#E9E4D8", sidebar: "#E3DDCF", primary: "#2E2E2E", text: "#1E1E1E" },
+};
 
 export function ThemeSettings() {
-  const { theme: persistedTheme, setTheme } = useAppTheme();
-  const [draft, setDraft] = useState<AppTheme>(persistedTheme);
-  const [saving, setSaving] = useState(false);
+  const { theme, setTheme } = useAppTheme();
+  const [applying, setApplying] = useState(false);
 
-  useEffect(() => {
-    setDraft(persistedTheme);
-  }, [persistedTheme]);
-
-  const hasChange = draft !== persistedTheme;
-
-  const handleSave = () => {
-    setSaving(true);
-    setTheme(draft);
-    showSuccessToast(`Theme changed to ${APP_THEMES.find((t) => t.value === draft)?.label ?? draft}`);
+  const handleSelect = (next: AppTheme) => {
+    if (next === theme || applying) return;
+    setApplying(true);
+    setTheme(next);
+    showSuccessToast(`Theme changed to ${APP_THEMES.find((t) => t.value === next)?.label ?? next}`);
     // Ensure all components pick up the new theme vars.
     // CSS vars update live via data-theme attribute, but reload guarantees
     // any component that cached computed styles or floating portals re-render
@@ -46,48 +42,48 @@ export function ThemeSettings() {
           <Palette className="size-4" />
           Appearance
         </CardTitle>
-        <CardDescription>
-          Choose your workspace theme. Zen Linen is a calm, minimal linen palette — Solar Dusk is warm amber & stone.
-        </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="space-y-2">
-          <Label htmlFor="theme-select" className="text-sm font-medium">
-            Theme
-          </Label>
-          <Select value={draft} onValueChange={(v) => setDraft(v as AppTheme)}>
-            <SelectTrigger id="theme-select" className="w-full">
-              <SelectValue placeholder="Select theme" />
-            </SelectTrigger>
-            <SelectContent>
-              {APP_THEMES.map((t) => (
-                <SelectItem key={t.value} value={t.value}>
-                  <div className="flex flex-col text-left">
-                    <span className="text-sm font-medium">{t.label}</span>
-                    <span className="text-muted-foreground text-xs">{t.description}</span>
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-muted-foreground text-xs">
-            Applies to all UI elements, sidebars, cards, and floating tools. Saved per browser — persists across sessions.
-          </p>
+      <CardContent>
+        <div className="grid grid-cols-2 gap-3" role="group" aria-label="Appearance">
+          {APP_THEMES.map((t) => {
+            const swatch = THEME_SWATCHES[t.value];
+            const selected = t.value === theme;
+            return (
+              <button
+                key={t.value}
+                type="button"
+                onClick={() => handleSelect(t.value)}
+                disabled={applying}
+                aria-pressed={selected}
+                title={t.description}
+                className={cn(
+                  "group rounded-lg border p-2 text-left transition-all",
+                  "hover:border-foreground/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  selected ? "border-primary ring-1 ring-primary" : "border-border/60",
+                )}
+              >
+                {/* Mini preview in the theme's own palette */}
+                <span
+                  className="flex h-16 overflow-hidden rounded-md"
+                  style={{ backgroundColor: swatch.bg }}
+                  aria-hidden="true"
+                >
+                  <span className="w-1/4 shrink-0" style={{ backgroundColor: swatch.sidebar }} />
+                  <span className="flex flex-1 flex-col justify-center gap-1.5 px-2.5">
+                    <span className="h-1.5 w-3/4 rounded-full" style={{ backgroundColor: swatch.text, opacity: 0.55 }} />
+                    <span className="h-1.5 w-1/2 rounded-full" style={{ backgroundColor: swatch.text, opacity: 0.3 }} />
+                    <span className="mt-0.5 h-2 w-2 rounded-full" style={{ backgroundColor: swatch.primary }} />
+                  </span>
+                </span>
+                {/* Label row: name + selected check */}
+                <span className="mt-2 flex items-center justify-between px-0.5">
+                  <span className="text-[12px] font-medium text-foreground">{t.label}</span>
+                  {selected && <Check className="size-3.5 text-primary" aria-label="Selected" />}
+                </span>
+              </button>
+            );
+          })}
         </div>
-
-        {hasChange && (
-          <div className="flex items-center gap-2">
-            <Button onClick={handleSave} disabled={saving} size="sm" className="gap-2">
-              <Save className="size-4" />
-              {saving ? "Saving…" : "Save"}
-            </Button>
-            <span className="text-muted-foreground text-xs">Save to apply {APP_THEMES.find((t) => t.value === draft)?.label} and reload</span>
-          </div>
-        )}
-
-        {!hasChange && (
-          <p className="text-muted-foreground text-xs">Current theme: {APP_THEMES.find((t) => t.value === persistedTheme)?.label}</p>
-        )}
       </CardContent>
     </Card>
   );

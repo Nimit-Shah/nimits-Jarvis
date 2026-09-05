@@ -3,20 +3,10 @@
 import { useState } from "react";
 import { FolderOpen, ShieldAlert, PenLine } from "lucide-react";
 import { trpc } from "~/clients/trpc";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { Label } from "~/components/ui/label";
 import { Switch } from "~/components/ui/switch";
 import { Input } from "~/components/ui/input";
-
-const FD_NOTES = (
-  <p className="text-muted-foreground text-[11px] leading-relaxed">
-    macOS may still block <code className="rounded bg-muted px-1">~/Desktop</code>,{" "}
-    <code className="rounded bg-muted px-1">~/Documents</code> and{" "}
-    <code className="rounded bg-muted px-1">~/Downloads</code> until Full Disk Access is granted:{" "}
-    <span className="text-foreground/80">System Settings → Privacy &amp; Security → Full Disk Access</span> — add the
-    app that runs Jarvis, then restart it.
-  </p>
-);
 
 export function FsSettings({
   instanceId,
@@ -51,12 +41,8 @@ export function FsSettings({
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <FolderOpen className="size-4" /> Files
+          <FolderOpen className="size-4" /> File Access
         </CardTitle>
-        <CardDescription>
-          Local file access for this project. The per-message mode is chosen in the composer dropdown and resets each
-          new chat — these switches are the ceiling.
-        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
         {/* Read ceiling */}
@@ -65,11 +51,10 @@ export function FsSettings({
             <FolderOpen className="mt-0.5 size-4 shrink-0 text-emerald-500" />
             <div className="space-y-0.5">
               <Label htmlFor="fs-read" className="cursor-pointer text-sm font-semibold">
-                Allow reading local files
+                Read files
               </Label>
               <p className="text-muted-foreground text-xs leading-relaxed">
-                Lets the agent list directories and read files on your Mac. Off removes the file tools entirely.
-                File and folder names are sent to the model as-is. File contents are still redacted for cloud models.
+                Let the agent list directories and read files on this Mac.
               </p>
             </div>
           </div>
@@ -84,17 +69,16 @@ export function FsSettings({
           />
         </div>
 
-        {/* Write ceiling (Phase B tools will land behind this + per-action confirmation) */}
+        {/* Write ceiling */}
         <div className="flex items-start justify-between gap-4 border-t pt-4">
           <div className="flex items-start gap-3">
             <PenLine className="mt-0.5 size-4 shrink-0 text-amber-500" />
             <div className="space-y-0.5">
               <Label htmlFor="fs-write" className="cursor-pointer text-sm font-semibold">
-                Allow write access
+                Write files
               </Label>
               <p className="text-muted-foreground text-xs leading-relaxed">
-                Lets you choose Full System Access in a conversation. Every individual change will still ask for your
-                confirmation.
+                Unlock Full System Access in a conversation; every change still asks first.
               </p>
             </div>
           </div>
@@ -122,21 +106,24 @@ export function FsSettings({
             onKeyDown={(e) => {
               if (e.key === "Enter") (e.target as HTMLInputElement).blur();
             }}
-            placeholder="Empty = your home directory"
+            placeholder="~/ (Home Directory)"
             className="h-8 text-xs"
             maxLength={500}
             disabled={update.isPending}
           />
           <p className="text-muted-foreground text-[11px]">
-            Optional. Restricts all file tools to this subtree (symlinks that escape it are refused). Leave empty for
-            your whole home directory.
+            Restricts agent access to a specific subfolder.
           </p>
         </div>
 
         {/* macOS TCC note — the single most likely support question */}
         <div className="flex gap-2 rounded-md border border-border/60 bg-muted/20 p-3">
           <ShieldAlert className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-          {FD_NOTES}
+          <p className="text-muted-foreground text-[11px] leading-relaxed">
+            If Desktop, Documents, or Downloads look empty, grant Full Disk Access to
+            the app that runs Jarvis in System Settings → Privacy &amp; Security,
+            then restart it.
+          </p>
         </div>
 
         {update.isPending && <p className="text-muted-foreground text-[11px]">Saving…</p>}

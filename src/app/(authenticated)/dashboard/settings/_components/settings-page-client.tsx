@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Shield,
   MessageSquare,
@@ -96,12 +96,23 @@ export function SettingsPageClient() {
   const [instanceId] = useInstanceId();
   const [activeCategory, setActiveCategory] =
     useState<SettingsCategory>("security");
+  // Gate content on mount: the server always renders the loading skeleton
+  // (no ?instance= param, no query cache), but on client-side navigation the
+  // cache may already be warm — rendering content on the first client pass
+  // would mismatch the server HTML and force React to rebuild the tree.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    // Intentional mount gate (not derived state): first client render must
+    // match the server skeleton — see comment below.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMounted(true);
+  }, []);
   const { data, isLoading, error } = trpc.nimitsJarvis.getInstance.useQuery({
     instanceId,
   });
   const instance = data?.instance ?? null;
 
-  if (isLoading) {
+  if (!mounted || isLoading) {
     return (
       <div className="flex h-full items-center justify-center p-4">
         <div className="bg-muted h-5 w-5 animate-pulse rounded-md" />
