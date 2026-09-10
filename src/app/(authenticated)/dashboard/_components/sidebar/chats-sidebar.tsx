@@ -63,7 +63,10 @@ export function ChatsSidebar() {
       void utils.chats.list.invalidate();
       setDeleteTarget(null);
       if (deleteTarget === chatId) {
-        void createChat.mutateAsync({ instanceId });
+        // Land on the unsaved New Chat state (?chat=new): no thread is
+        // created — the existing start terminal renders and the thread is
+        // born lazily on the first submitted message.
+        setChatId("new");
       }
     },
   });

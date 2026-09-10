@@ -3,10 +3,40 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import { useChat } from "@ai-sdk/react";
 import type { UIMessage } from "@ai-sdk/react";
-import { DefaultChatTransport, lastAssistantMessageIsCompleteWithToolCalls } from "ai";
+import {
+  DefaultChatTransport,
+  lastAssistantMessageIsCompleteWithToolCalls,
+} from "ai";
 import { trpc } from "~/clients/trpc";
 import { useInstanceId } from "~/hooks/use-instance-id";
+import { useChatId } from "~/hooks/use-chat-id";
 import { showErrorToast } from "~/components/core/toast-notifications";
+
+/**
+ * Parses a `409 run_in_progress` transport error body.
+ * Returns null when the error is anything else.
+ */
+function parseRunInProgress(
+  errorMessage: string,
+): { activeStreamId: string | null; chatId: string | null } | null {
+  try {
+    const parsed = JSON.parse(errorMessage) as {
+      error?: unknown;
+      activeStreamId?: unknown;
+      chatId?: unknown;
+    };
+    if (parsed.error !== "run_in_progress") return null;
+    return {
+      activeStreamId:
+        typeof parsed.activeStreamId === "string"
+          ? parsed.activeStreamId
+          : null,
+      chatId: typeof parsed.chatId === "string" ? parsed.chatId : null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 export function useChatHook({
   initialMessages,
@@ -15,16 +45,51 @@ export function useChatHook({
 }: {
   initialMessages: UIMessage[];
   streamId: string | null;
-  chatId: string;
+  chatId: string | null;
 }) {
   const [instanceId] = useInstanceId();
+  const [, setUrlChatId] = useChatId();
   const utils = trpc.useUtils();
   const seededRef = useRef(false);
   const [isSeeded, setIsSeeded] = useState(false);
 
+  // Latest known live stream for this chat — the query value can lag behind
+  // a 409 response, so the transport reads through this ref and the 409
+  // handler can point it at the winning stream before resuming.
+  const liveStreamIdRef = useRef<string | null>(streamId);
+  liveStreamIdRef.current = streamId;
+
+  type ChatApi = Pick<
+    ReturnType<typeof useChat>,
+    "setMessages" | "clearError" | "resumeStream"
+  >;
+  const chatApiRef = useRef<ChatApi | null>(null);
+
+  // Unsaved New Chat (chatId null): the thread is created lazily by the
+  // server on the first submit. These refs learn the fresh ids from the
+  // first response (X-Chat-Id / X-Stream-Id headers, or a 409 body) so the
+  // client can surface the sidebar entry immediately and navigate to the
+  // real thread when the first response completes.
+  const pendingChatIdRef = useRef<string | null>(null);
+  const lastStreamIdRef = useRef<string | null>(null);
+
   const transport = useMemo(() => {
     return new DefaultChatTransport({
       api: "/api/chat",
+      fetch: async (url, init) => {
+        const res = await globalThis.fetch(url, init);
+        const createdChatId = res.headers.get("X-Chat-Id");
+        if (createdChatId) {
+          pendingChatIdRef.current = createdChatId;
+          // The thread now exists — surface its sidebar entry right away.
+          void utils.chats.list.invalidate();
+        }
+        const streamIdHeader = res.headers.get("X-Stream-Id");
+        if (streamIdHeader) {
+          lastStreamIdRef.current = streamIdHeader;
+        }
+        return res;
+      },
       prepareSendMessagesRequest: ({ messages, body }) => ({
         body: {
           ...body,
@@ -46,7 +111,10 @@ export function useChatHook({
             };
           }),
           instanceId,
-          chatId,
+          // Unsaved New Chat posts without a chatId — the server creates
+          // the thread on the first submitted message. undefined (not null)
+          // so the key is dropped from the JSON body.
+          chatId: chatId ?? undefined,
           // isVoice rides the sendMessage options body (2nd arg), NOT message
           // metadata — requestMetadata/message metadata never reached the
           // server before, so VOICE_MODE_GUIDELINES never applied.
@@ -60,21 +128,54 @@ export function useChatHook({
         },
       }),
       prepareReconnectToStreamRequest: () => ({
-        api: `/api/chat?streamId=${streamId}&chatId=${chatId}`,
+        api: `/api/chat?streamId=${liveStreamIdRef.current}&chatId=${pendingChatIdRef.current ?? chatId ?? ""}`,
       }),
     });
   }, [streamId, chatId, instanceId]);
 
   const chat = useChat({
-    id: `chat-${chatId}`,
+    id: `chat-${chatId ?? "new"}`,
     transport,
     resume: streamId !== null,
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
     onFinish: () => {
       void utils.nimitsJarvis.getHistory.invalidate();
       void utils.chats.list.invalidate();
+      // First message of an unsaved New Chat completed: the thread now
+      // exists — navigate to it so the URL, history, and sidebar settle on
+      // the real conversation. The provider remounts with persisted rows.
+      if (chatId === null && pendingChatIdRef.current) {
+        const createdId = pendingChatIdRef.current;
+        pendingChatIdRef.current = null;
+        setUrlChatId(createdId);
+      }
     },
     onError: (error) => {
+      // Lost the in-flight race (or double-fired): attach to the winning
+      // run instead of erroring. The server wrote no rows for this submit,
+      // so drop the optimistic user message and resume the live stream.
+      const duplicate = parseRunInProgress(error.message);
+      if (duplicate) {
+        if (duplicate.activeStreamId) {
+          liveStreamIdRef.current = duplicate.activeStreamId;
+        }
+        if (duplicate.chatId) {
+          pendingChatIdRef.current = duplicate.chatId;
+          void utils.chats.list.invalidate();
+        }
+        chatApiRef.current?.clearError();
+        chatApiRef.current?.setMessages((msgs) =>
+          msgs.length > 0 && msgs[msgs.length - 1]?.role === "user"
+            ? msgs.slice(0, -1)
+            : msgs,
+        );
+        if (duplicate.activeStreamId) {
+          void chatApiRef.current?.resumeStream();
+        }
+        void utils.nimitsJarvis.getHistory.invalidate();
+        void utils.chats.list.invalidate();
+        return;
+      }
       void utils.nimitsJarvis.getHistory.invalidate();
       void utils.chats.list.invalidate();
       const msg = error.message || "An error occurred";
@@ -87,6 +188,12 @@ export function useChatHook({
       }
     },
   });
+
+  chatApiRef.current = {
+    setMessages: chat.setMessages,
+    clearError: chat.clearError,
+    resumeStream: chat.resumeStream,
+  };
 
   // Stable per-message creation timestamps for live/streamed messages. History
   // messages carry createdAt in metadata from getHistory; anything else (a
@@ -131,11 +238,19 @@ export function useChatHook({
   sendMessageRef.current = chat.sendMessage;
 
   // Standard text-mode send — isVoice always false, fs mode passed through.
+  // Each send carries a fresh idempotency key so a retried/double-fired
+  // submit attaches to the first run instead of starting a second one.
   const sendMessage = useCallback(
     (text: string, fsAccessMode?: "read-only" | "full") => {
       void sendMessageRef.current(
         { text },
-        { body: { isVoice: false, fsAccessMode } },
+        {
+          body: {
+            isVoice: false,
+            fsAccessMode,
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
       );
     },
     [],
@@ -144,15 +259,29 @@ export function useChatHook({
   // Voice-mode send — isVoice is always true. Rides the sendMessage OPTIONS
   // body (2nd arg) so prepareSendMessagesRequest's `body` spread picks it up.
   const sendVoiceMessage = useCallback((text: string) => {
-    void sendMessageRef.current({ text }, { body: { isVoice: true } });
+    void sendMessageRef.current(
+      { text },
+      { body: { isVoice: true, idempotencyKey: crypto.randomUUID() } },
+    );
   }, []);
 
   const stopRef = useRef(chat.stop);
   stopRef.current = chat.stop;
 
   const stableStop = useCallback(() => {
+    const sid = liveStreamIdRef.current ?? lastStreamIdRef.current;
+    const stopChatId = chatId ?? pendingChatIdRef.current;
+    // Explicit server cancel first: on background-capable runtimes the run
+    // survives a dropped connection, so aborting the fetch alone would only
+    // hide it. DELETE is idempotent — safe to call with a stale streamId.
+    if (sid && stopChatId) {
+      const url = `/api/chat?chatId=${encodeURIComponent(stopChatId)}&streamId=${encodeURIComponent(sid)}`;
+      void fetch(url, { method: "DELETE" }).catch((err: unknown) =>
+        console.error("[chat] cancel request failed:", err),
+      );
+    }
     void stopRef.current();
-  }, []);
+  }, [chatId]);
 
   // Approval-card flow (Phase B): supply a tool result for a no-execute tool
   // (fs_edit/fs_write/…) after the operator clicks Approve/Reject. Stable ref

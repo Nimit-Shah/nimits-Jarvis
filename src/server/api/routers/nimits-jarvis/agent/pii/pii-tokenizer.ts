@@ -12,7 +12,11 @@
 
 import { createHash } from "crypto";
 import type { PIIMatch, PIIMapping, PIIType, PIIVaultStats } from "./pii-types";
-import { scanForPII, scanForPIIEnhanced, extractStructuredPII } from "./pii-scanner";
+import {
+  scanForPII,
+  scanForPIIEnhanced,
+  extractStructuredPII,
+} from "./pii-scanner";
 import { isProtectedTerm } from "./protected-terms";
 
 /** Token format: email gets domain format, others get bracket format */
@@ -39,9 +43,16 @@ function canonicalizeForLookup(value: string): string {
 }
 
 /** True if text contains a PII token anywhere (not necessarily bounded by word boundaries) */
-const CONTAINS_TOKEN_RE = /(?:\[?CLAW_\[?[A-Z_]+_[A-F0-9]{4}\]?|CLAW_EMAIL_[A-F0-9]{4}@trustclaw\.anon)/;
+const CONTAINS_TOKEN_RE =
+  /(?:\[?CLAW_\[?[A-Z_]+_[A-F0-9]{4}\]?|CLAW_EMAIL_[A-F0-9]{4}@trustclaw\.anon)/;
 export function containsTokenPattern(text: string): boolean {
   return CONTAINS_TOKEN_RE.test(text);
+}
+
+/** Serializable PIIVault state — see PIIVault.snapshot(). */
+export interface PIIVaultSnapshot {
+  mappings: PIIMapping[];
+  counters: Array<[PIIType, number]>;
 }
 
 export class PIIVault {
@@ -221,6 +232,58 @@ export class PIIVault {
     return this.mappings.length > 0;
   }
 
+  /**
+   * Serializable snapshot of the token mappings, so a later request (e.g.
+   * a stream resume in GET /api/chat) can rebuild an equivalent vault and
+   * restore tokens on the way out. The snapshot contains real values —
+   * callers must encrypt it and give it the same TTL as the run pointer.
+   */
+  snapshot(): PIIVaultSnapshot {
+    return {
+      mappings: this.mappings.map((m) => ({ ...m })),
+      counters: [...this.counters.entries()],
+    };
+  }
+
+  /** Rebuilds a vault from {@link snapshot}. Returns null on bad input. */
+  static fromSnapshot(snap: unknown): PIIVault | null {
+    if (!snap || typeof snap !== "object") return null;
+    const { mappings, counters } = snap as {
+      mappings?: unknown;
+      counters?: unknown;
+    };
+    if (!Array.isArray(mappings) || !Array.isArray(counters)) return null;
+    const vault = new PIIVault();
+    for (const m of mappings) {
+      if (
+        !m ||
+        typeof m !== "object" ||
+        typeof (m as { token?: unknown }).token !== "string" ||
+        typeof (m as { original?: unknown }).original !== "string"
+      ) {
+        return null;
+      }
+      const mapping = m as PIIMapping;
+      vault.mappings.push({ ...mapping });
+      vault.forwardMap.set(
+        canonicalizeForLookup(mapping.original),
+        mapping.token,
+      );
+      vault.reverseMap.set(mapping.token, mapping.original);
+    }
+    for (const entry of counters) {
+      if (
+        !Array.isArray(entry) ||
+        typeof entry[0] !== "string" ||
+        typeof entry[1] !== "number"
+      ) {
+        return null;
+      }
+      vault.counters.set(entry[0] as PIIType, entry[1] as number);
+    }
+    return vault;
+  }
+
   // ─── Private ───────────────────────────────────────────────────
 
   private async deepRedact(value: unknown, depth = 0): Promise<unknown> {
@@ -293,7 +356,9 @@ export class PIIVault {
 
     if (value !== null && typeof value === "object") {
       const result: Record<string, unknown> = {};
-      for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      for (const [key, val] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
         result[key] = this.deepRestore(val, depth + 1);
       }
       return result;
@@ -337,8 +402,7 @@ export class PIIVault {
       const match = newMatches[i]!;
       if (this.shouldSkipMatch(match, tokenSpans)) continue;
       const token = this.registerPII(match.type, match.value);
-      result =
-        result.slice(0, match.start) + token + result.slice(match.end);
+      result = result.slice(0, match.start) + token + result.slice(match.end);
     }
 
     return result;
@@ -589,4 +653,3 @@ function findTokenSpans(text: string): Array<{ start: number; end: number }> {
   }
   return spans;
 }
-

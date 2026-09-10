@@ -4,7 +4,7 @@ import { after } from "next/server";
 import { db } from "~/server/clients/db";
 import { getOrCreateSessionAndTools } from "~/server/clients/composio";
 import { decrypt } from "~/lib/crypto";
-import { buildSystemPrompt } from "./system-prompt";
+import { buildSystemPrompt, buildVolatileModeLines } from "./system-prompt";
 import { isPlaceholderChatName, deriveChatName } from "./chat-name";
 import { DEFAULT_TIMEZONE } from "~/lib/timezone";
 import { ollamaProvider } from "~/server/clients/ollama";
@@ -15,6 +15,7 @@ import {
 } from "./tools";
 import { getContextWindow } from "./context/context-window";
 import { pruneContext } from "./context/context-pruning";
+import { estimateSectionTokens } from "./token-metrics";
 import {
   loadContextMessages,
   buildContext,
@@ -28,14 +29,23 @@ import {
   DEFAULT_COMPACTION_SETTINGS,
   type CompactionSettings,
 } from "./context/token-estimation";
+import type { SectionTokens } from "./token-metrics";
 
 // ---------------------------------------------------------------------------
 // Helpers for collapsed reasoning/tool summary (Claude.ai-inspired)
 // ---------------------------------------------------------------------------
 function formatToolDisplayName(raw: string): string {
   let d = raw;
-  for (const p of ["COMPOSIO_", "RUBE_"]) if (d.startsWith(p)) { d = d.slice(p.length); break; }
-  return d.replace(/_/g, " ").split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+  for (const p of ["COMPOSIO_", "RUBE_"])
+    if (d.startsWith(p)) {
+      d = d.slice(p.length);
+      break;
+    }
+  return d
+    .replace(/_/g, " ")
+    .split(" ")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
 }
 function extractReasoningGloss(text: string): string | undefined {
   const m = text.match(/^\s*SUMMARY:\s*(.+)$/m);
@@ -46,7 +56,12 @@ function extractReasoningGloss(text: string): string | undefined {
   return words.length > 3 ? words : undefined;
 }
 import { stripToolResultEchoes } from "./strip-tool-echoes";
-import { clearStreamingMessage } from "~/server/clients/redis";
+import {
+  clearStreamingMessage,
+  persistVaultSnapshot,
+  releaseChatRun,
+} from "~/server/clients/redis";
+import { releaseRun } from "~/server/lib/run-registry";
 import { MAX_AUTO_WRITES_PER_MESSAGE } from "~/server/lib/fs-access/write-paths";
 import type { ReconstructedMessage, FsAccessMode } from "./types";
 import { getModelProvider, isAnthropicModel, buildLLM } from "./model-utils";
@@ -267,7 +282,9 @@ async function redactContextMessages(
             redactedParts.push({
               ...part,
               text: await vault.redact(part.text as string),
-              ...(gloss !== undefined ? { gloss: await vault.redact(gloss) } : {}),
+              ...(gloss !== undefined
+                ? { gloss: await vault.redact(gloss) }
+                : {}),
             } as typeof part);
           } else {
             redactedParts.push(part);
@@ -304,6 +321,12 @@ interface PrepareAgentRunParams {
   userMessageType?: "hidden";
   isVoice?: boolean;
   fsAccessMode?: FsAccessMode; // defaults to "read-only" via resolveFsMode when absent
+  /**
+   * Web-chat run id (the SSE streamId). Passed so onFinish can release the
+   * process-local run entry (heartbeat) and so callers can mark terminal
+   * state on abort. Optional — telegram/cron runs don't have one.
+   */
+  streamId?: string;
 }
 
 interface PrepareAgentRunResult {
@@ -311,6 +334,21 @@ interface PrepareAgentRunResult {
   messages: ReconstructedMessage[];
   /** PII vault for this request. Null if redaction is disabled (local model). */
   piiVault: PIIVault | null;
+  /** DB id of the pre-created assistant row (for abort/failure marking). */
+  assistantMessageId: string;
+  /**
+   * Per-request timing + payload accounting (§0.1 instrumentation).
+   * Shared mutable object: route.ts records ttftMs on the first SSE byte;
+   * the agent's onFinish records genMs and persists/logs everything.
+   */
+  metrics: RequestMetrics;
+}
+
+interface RequestMetrics {
+  sectionTokens: SectionTokens | null;
+  ttftMs: number | null;
+  genMs: number | null;
+  startedAt: number;
 }
 
 type PrepareResult = { status: "ready"; result: PrepareAgentRunResult };
@@ -318,8 +356,16 @@ type PrepareResult = { status: "ready"; result: PrepareAgentRunResult };
 export async function prepareAgentRun(
   params: PrepareAgentRunParams,
 ): Promise<PrepareResult> {
-  const { instanceId, chatId, userMessage, source, userMessageType, isVoice, fsAccessMode } =
-    params;
+  const {
+    instanceId,
+    chatId,
+    userMessage,
+    source,
+    userMessageType,
+    isVoice,
+    fsAccessMode,
+    streamId,
+  } = params;
   const t0 = performance.now();
   const mark = (label: string) => {
     console.log(
@@ -442,7 +488,9 @@ export async function prepareAgentRun(
     if (mcpServersForPrompt.length > 0) {
       const block = [
         "Connected MCP servers for this project:",
-        ...mcpServersForPrompt.map((s) => `- ${s.label}: external tooling via MCP.`),
+        ...mcpServersForPrompt.map(
+          (s) => `- ${s.label}: external tooling via MCP.`,
+        ),
       ].join("\n");
       systemPrompt = `${systemPrompt}\n\n---\n\n${block}`;
     }
@@ -458,8 +506,18 @@ export async function prepareAgentRun(
     dbMessages,
     chat.lastCompactionSummary,
     userMessage,
-    relevantMemories,
-    userTimezone,
+    {
+      // Per-turn volatile context — stays OUT of the cached prefix (§3.1).
+      // The static system prompt is byte-stable across turns, so only the
+      // final user message changes between requests.
+      relevantMemories,
+      userTimezone,
+      modeLines: buildVolatileModeLines({
+        fsReadEnabled: instance.fsReadEnabled,
+        fsMode,
+        isVoice: isVoice ?? false,
+      }),
+    },
   );
 
   const contextWindow = getContextWindow(chat.model);
@@ -527,8 +585,14 @@ export async function prepareAgentRun(
   // Trim verbose tool schemas to reduce token usage by ~40-60%.
   // This prevents free-tier TPM rate-limit errors with smaller models.
   // MCP goes before optimize so its schemas are also trimmed; customTools stay raw.
-  const optimized = optimizeToolSchemas({ ...rawComposioTools, ...rawMcpTools });
+  const optimized = optimizeToolSchemas({
+    ...rawComposioTools,
+    ...rawMcpTools,
+  });
 
+  // Deterministic merge: tool KEYS are sorted so serialization is byte-stable
+  // across requests (§3.2) — provider cache prefix cannot be invalidated by a
+  // reordering session.tools()/MCP sync.
   const customTools = createCustomTools(instanceId, chatId, userTimezone, {
     fsReadEnabled: instance.fsReadEnabled,
     fsMode,
@@ -538,6 +602,12 @@ export async function prepareAgentRun(
     // Blast-radius budget for auto-writes (B1). One logical change per message.
     changeBudget: { remaining: MAX_AUTO_WRITES_PER_MESSAGE },
   });
+  const allToolsUnordered: ToolSet = { ...optimized, ...customTools };
+  const allTools: ToolSet = Object.fromEntries(
+    Object.keys(allToolsUnordered)
+      .sort()
+      .map((k) => [k, allToolsUnordered[k]!]),
+  ) as ToolSet;
 
   // Per-request cache of restored (real) tool-call inputs/outputs, keyed by
   // toolCallId (prefixed with "out:" for outputs). Ensures restoreDeep() is
@@ -548,9 +618,10 @@ export async function prepareAgentRun(
   // Wrap tool executors with sanitization + optional PII redaction.
   // When a vault is active, tool results are scanned for PII and
   // sensitive values are replaced with tokens before the LLM sees them.
-  // One merge point — customTools last so they win on collision.
-  const allTools: ToolSet = wrapToolExecutors(
-    { ...optimized, ...customTools },
+  // One merge point — customTools last so they win on collision. allTools is
+  // key-sorted (see above), and wrapping preserves that order.
+  const agentTools: ToolSet = wrapToolExecutors(
+    allTools,
     piiVault,
     restoreCache,
     {
@@ -601,6 +672,16 @@ export async function prepareAgentRun(
   // the agent name & product name are never tokenized.
   const safeSystemPrompt = systemPrompt;
 
+  // Section 0.1 instrumentation — shared mutable metrics. ttftMs is recorded by
+  // route.ts on the first SSE byte; genMs + payload accounting here in onFinish;
+  // sectionTokens is filled once the final (redacted) message array exists.
+  const metrics: RequestMetrics = {
+    sectionTokens: null,
+    ttftMs: null,
+    genMs: null,
+    startedAt: Date.now(),
+  };
+
   const agent = new ToolLoopAgent({
     model,
     instructions: {
@@ -614,28 +695,27 @@ export async function prepareAgentRun(
         },
       }),
     } satisfies SystemModelMessage,
-    tools: allTools,
+    tools: agentTools,
     // No per-prompt step ceiling — allow long-running tasks (e.g., 33-product scrape) to complete.
     // Hard ceiling removed per user request; relies on model natural termination and Vercel maxDuration (300s).
     stopWhen: stepCountIs(100),
     // Disable Qwen3 thinking mode to prevent empty-output errors
     // and cut token generation time in half.
-    // maxTokens: 512 caps conversational replies; tool-call responses are
-    // not bound by this since they stream until the tool schema is complete.
+    // No maxTokens cap: replies and tool calls stream until the model stops
+    // naturally (bounded by stopWhen below and the route maxDuration).
     ...(isOllama && {
       providerOptions: {
         ollama: { think: false },
       },
-      maxTokens: 512,
     }),
-    // Reasoning budget per step (OpenRouter only): step 0 plans the task,
-    // every later step just picks the next directory/tool and doesn't need
-    // 200 words of deliberation. Also raise the output ceiling — with
-    // provider defaults, reasoning consumed the whole token budget and
-    // truncated answers (finishReason "length" at 1000 completion / 1000
-    // reasoning tokens).
+    // Reasoning guidance per step (OpenRouter only, effort only — no token
+    // caps): step 0 plans the task, every later step just picks the next
+    // directory/tool and doesn't need 200 words of deliberation. No
+    // maxOutputTokens ceiling either, so long-form answers (e.g. raw commit
+    // histories) are never cut mid-tool-call — a truncation inside a
+    // tool-call block yields malformed args, a retry, and a phantom
+    // duplicate in the UI.
     ...(provider === "openrouter" && {
-      maxOutputTokens: 2_000,
       prepareStep: ({ stepNumber }) => ({
         providerOptions: {
           openrouter: {
@@ -644,10 +724,43 @@ export async function prepareAgentRun(
         },
       }),
     }),
+    // Per-step truncation signal: we set no output ceiling, so any `length`
+    // finish comes from the provider side — log it with run context.
+    onStepFinish: async (event) => {
+      const reason = (event as { finishReason?: unknown }).finishReason;
+      if (reason === "length") {
+        console.warn("[agent/step] truncated by output limit", {
+          instanceId,
+          chatId,
+          source,
+          model: chat.model,
+        });
+      }
+    },
     onFinish: async (result) => {
-      await clearStreamingMessage(chatId).catch((error) =>
-        console.error("[agent/onFinish] clearStreamingMessage failed:", error),
-      );
+      // The run reached a terminal state — stop the heartbeat so the Redis
+      // pointer is no longer refreshed (missing key reads as terminal).
+      if (streamId) {
+        releaseRun(streamId);
+        // Final vault mappings (including streaming registrations) so any
+        // resumed replay restores tokens. Left to TTL expiry — post-completion
+        // resumes that still find stream data need it.
+        if (piiVault) {
+          await persistVaultSnapshot(streamId, piiVault).catch((error) =>
+            console.error("[agent/onFinish] vault snapshot failed:", error),
+          );
+        }
+        await releaseChatRun(chatId, streamId).catch((error) =>
+          console.error("[agent/onFinish] releaseChatRun failed:", error),
+        );
+      } else {
+        await clearStreamingMessage(chatId).catch((error) =>
+          console.error(
+            "[agent/onFinish] clearStreamingMessage failed:",
+            error,
+          ),
+        );
+      }
       try {
         const { totalUsage, steps, finishReason } = result;
         const inputTokens = totalUsage.inputTokens ?? 0;
@@ -659,6 +772,16 @@ export async function prepareAgentRun(
 
         // Build assistant content from steps (UIMessage parts format)
         const assistantParts: Array<Record<string, unknown>> = [];
+
+        // §4.1 — full tool-result persistence, keyed by tool-call id, written
+        // once per run. This is what makes every §4 reduction addressable.
+        const persistedToolResults: Array<{
+          instanceId: string;
+          chatId: string;
+          callId: string;
+          toolName: string;
+          payload: unknown;
+        }> = [];
 
         for (const step of steps) {
           // Persist reasoning BEFORE tool calls so chainItems order is thinking → acting
@@ -714,6 +837,15 @@ export async function prepareAgentRun(
               input: tcInput,
               output: tcResult ?? {},
             });
+            if (tcResult !== null && tcResult !== undefined) {
+              persistedToolResults.push({
+                instanceId,
+                chatId,
+                callId: tc.toolCallId,
+                toolName: tc.toolName,
+                payload: toPlainRecordSafe(tcResult),
+              });
+            }
           }
 
           const stepText = stripToolResultEchoes(step.text);
@@ -738,7 +870,30 @@ export async function prepareAgentRun(
           });
         }
 
+        // §4.1 — persist full results before the message update. Non-fatal: a
+        // failed write just means that run's results are unreachable by
+        // read_tool_result (history still carries the in-context copies).
+        if (persistedToolResults.length > 0) {
+          await db.toolResult
+            .createMany({
+              data: persistedToolResults.map((r) => ({
+                instanceId: r.instanceId,
+                chatId: r.chatId,
+                callId: r.callId,
+                toolName: r.toolName,
+                payload: toPrismaJson(r.payload),
+              })),
+              skipDuplicates: true,
+            })
+            .catch((err: unknown) =>
+              console.error("[agent/tool-result] persistence failed:", err),
+            );
+        }
+
         // Update the pre-created assistant message with final content + totals
+        metrics.genMs = Date.now() - metrics.startedAt;
+        const finishReasonStr =
+          typeof finishReason === "string" ? finishReason : null;
         await db.message.update({
           where: { id: assistantMessageRow.id },
           data: {
@@ -747,8 +902,36 @@ export async function prepareAgentRun(
             outputTokens,
             cacheReadTokens,
             cacheWriteTokens,
+            sectionTokens: toPrismaJson(metrics.sectionTokens ?? {}),
+            ttftMs: metrics.ttftMs,
+            genMs: metrics.genMs,
+            finishReason: finishReasonStr,
+            runStatus: finishReasonStr === "error" ? "failed" : "completed",
           },
         });
+
+        // Section 0.1 instrumentation — one line per LLM request. Estimated
+        // section splits let each token-efficiency phase be attributed.
+        console.log(
+          "[agent/tokens]",
+          JSON.stringify({
+            instanceId,
+            chatId,
+            source,
+            model: chat.model,
+            provider,
+            sections: metrics.sectionTokens,
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+            cacheHit: cacheReadTokens > 0,
+            ttftMs: metrics.ttftMs,
+            genMs: metrics.genMs,
+            finishReason: finishReasonStr,
+            stepIndex: steps.length,
+          }),
+        );
 
         // Fire-and-forget post-response tasks
         const totalContextTokens = inputTokens + outputTokens;
@@ -810,6 +993,11 @@ export async function prepareAgentRun(
       redactedMessages as any,
     )) as typeof redactedMessages;
   }
+  metrics.sectionTokens = estimateSectionTokens(
+    safeSystemPrompt,
+    allTools,
+    redactedMessages,
+  );
   mark("setup complete (pre-first-token)");
 
   return {
@@ -818,6 +1006,8 @@ export async function prepareAgentRun(
       agent,
       messages: redactedMessages,
       piiVault,
+      assistantMessageId: assistantMessageRow.id,
+      metrics,
     },
   };
 }

@@ -8,7 +8,7 @@ import { ChatProvider } from "../chat-context";
 import { ChatView } from "./chat-view";
 import { NimitsJarvisChatSkeleton } from "./nimits-jarvis-chat.skeleton";
 
-function ChatWithProvider({ chatId }: { chatId: string }) {
+function ChatWithProvider({ chatId }: { chatId: string | null }) {
   return (
     <ChatProvider chatId={chatId}>
       <ChatView />
@@ -40,6 +40,14 @@ export function NimitsJarvisChat() {
       return;
     }
 
+    if (urlChatId && urlChatId !== "new") {
+      // Stale/unknown id (deleted thread, resurrected storage value, bad
+      // link): converge to the unsaved New Chat state instead of mounting a
+      // provider that can only 404. setChatId also overwrites the stored id.
+      setChatId("new");
+      return;
+    }
+
     if (!urlChatId || justLoaded) {
       const first = chats[0]!;
       setChatId(first.id);
@@ -49,6 +57,13 @@ export function NimitsJarvisChat() {
 
   if (!resolvedId) {
     return <NimitsJarvisChatSkeleton />;
+  }
+
+  // Explicit unsaved state (?chat=new): no thread exists yet. The provider
+  // renders the existing empty start terminal and the thread is created
+  // lazily by the server on the first submitted message — never before.
+  if (urlChatId === "new") {
+    return <ChatWithProvider key="new" chatId={null} />;
   }
 
   return <ChatWithProvider key={resolvedId} chatId={resolvedId} />;

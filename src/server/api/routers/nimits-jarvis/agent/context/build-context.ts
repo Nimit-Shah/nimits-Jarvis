@@ -15,6 +15,13 @@ import {
 import { runCompaction } from "../compaction/run-compaction";
 import { runMemoryFlush } from "../compaction/memory-flush";
 import { COMPACTION_SUMMARY_PREFIX } from "../compaction/prompts";
+import {
+  collectInvokedSlugs,
+  collapseSpentSearchResult,
+  stripToolResultBoilerplate,
+  SEARCH_TOOLS,
+} from "../tool-evict";
+import { reduceToolResultOutput } from "../tool-results/reduce";
 import type { PIIVault } from "../pii";
 
 const MESSAGE_SAFETY_CAP = 200;
@@ -133,12 +140,23 @@ export async function loadContextMessages(
   return rows.reverse();
 }
 
+/**
+ * Volatile context injected at the END of the final user message —
+ * everything here changes between requests, so it must never sit inside the
+ * cached prefix (docs/TOKEN_EFFICIENCY.md §3.1).
+ */
+export interface VolatileTail {
+  relevantMemories?: string[];
+  userTimezone?: string;
+  /** Per-message mode lines (fs access, voice) — see buildVolatileModeLines */
+  modeLines?: string;
+}
+
 export function buildContext(
   dbMessages: Awaited<ReturnType<typeof loadContextMessages>>,
   lastCompactionSummary: string | null,
   userMessage: string,
-  relevantMemories?: string[],
-  userTimezone?: string,
+  volatile?: VolatileTail,
 ): ReconstructedMessage[] {
   const aiMessages = deepSanitize(reconstructMessages(dbMessages));
 
@@ -152,17 +170,26 @@ export function buildContext(
   }
 
   let finalUserMessage = "";
-  if (userTimezone) {
-    const userTime = moment().tz(userTimezone);
-    finalUserMessage += `[Current Time: ${userTime.format("dddd, MMMM D, YYYY h:mm A")} (${userTimezone})]\n\n`;
+  const timezone = volatile?.userTimezone;
+  if (timezone) {
+    const userTime = moment().tz(timezone);
+    finalUserMessage += `[Current Time: ${userTime.format("dddd, MMMM D, YYYY h:mm A")} (${timezone})]\n\n`;
   }
-  if (relevantMemories && relevantMemories.length > 0) {
-    const memoryLines = relevantMemories.map((m) => `- ${m}`).join("\n");
+  const memoryLines = (volatile?.relevantMemories ?? [])
+    .map((m) => `- ${m}`)
+    .join("\n");
+  if (memoryLines) {
     finalUserMessage += `[Relevant Memories]\n${memoryLines}\n\n`;
+  }
+  if (volatile?.modeLines) {
+    finalUserMessage += `[Mode]\n${volatile.modeLines}\n\n`;
   }
   finalUserMessage += userMessage;
 
-  aiMessages.push({ role: "user" as const, content: sanitizeString(finalUserMessage) });
+  aiMessages.push({
+    role: "user" as const,
+    content: sanitizeString(finalUserMessage),
+  });
 
   return aiMessages;
 }
@@ -185,7 +212,26 @@ export function reconstructMessages(
 ): ReconstructedMessage[] {
   const result: ReconstructedMessage[] = [];
 
-  for (const msg of messages) {
+  // §2.1 — pre-pass: which slugs does this batch actually invoke later?
+  const invokedSlugs = collectInvokedSlugs(messages);
+
+  // §4.4 — pre-pass: index of the LAST assistant row carrying tool parts.
+  // Reduction age = how many assistant steps back the result sits.
+  let lastToolRowIndex = -1;
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    if (
+      (msg.content as Array<Record<string, unknown>>).some(
+        (p) => p?.type === "dynamic-tool",
+      )
+    ) {
+      lastToolRowIndex = i;
+    }
+  }
+
+  for (let msgIndex = 0; msgIndex < messages.length; msgIndex++) {
+    const msg = messages[msgIndex]!;
     const role = msg.role === "assistant" ? "assistant" : "user";
 
     const contentArray = Array.isArray(msg.content) ? msg.content : [];
@@ -206,7 +252,9 @@ export function reconstructMessages(
     const toolParts = contentArray
       .map((item: unknown) => dynamicToolPartSchema.safeParse(item))
       .filter(
-        (r): r is z.ZodSafeParseSuccess<z.infer<typeof dynamicToolPartSchema>> =>
+        (
+          r,
+        ): r is z.ZodSafeParseSuccess<z.infer<typeof dynamicToolPartSchema>> =>
           r.success,
       )
       .map((r) => r.data);
@@ -239,14 +287,41 @@ export function reconstructMessages(
     }
     result.push({ role: "assistant", content: assistantContent });
 
+    const age = Math.max(0, lastToolRowIndex - msgIndex);
     result.push({
       role: "tool",
-      content: toolParts.map((tc) => ({
-        type: "tool-result" as const,
-        toolCallId: tc.toolCallId,
-        toolName: tc.toolName,
-        output: toToolResultOutput(tc.output),
-      })),
+      content: toolParts.map((tc) => {
+        // §2 responses
+        let output = toToolResultOutput(tc.output);
+        if (tc.toolName === SEARCH_TOOLS) {
+          const collapsed = collapseSpentSearchResult(
+            tc.input,
+            tc.output,
+            invokedSlugs,
+          );
+          if (collapsed) output = collapsed;
+        }
+        if (output.type === "json") {
+          output = {
+            type: "json",
+            value: stripToolResultBoilerplate(output.value),
+          };
+        }
+        // §4.3/4.4 — age-decay: full for the current step, structured
+        // reduction for older steps. Always addressable via read_tool_result.
+        output = reduceToolResultOutput(
+          output,
+          age,
+          tc.toolCallId,
+          tc.toolName,
+        );
+        return {
+          type: "tool-result" as const,
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          output,
+        };
+      }),
     });
   }
 

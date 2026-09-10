@@ -2,6 +2,7 @@ import { Composio } from "@composio/core";
 import { VercelProvider } from "@composio/vercel";
 import type { ToolSet } from "ai";
 import { env } from "~/env";
+import { db } from "~/server/clients/db";
 
 /**
  * In-process cache of Composio tool-router sessions, keyed by instanceId.
@@ -40,6 +41,58 @@ interface CachedAgentComposio {
 
 const sessionCache = new Map<string, Promise<CachedAgentComposio>>();
 
+// ── Token-efficiency allowlist (TOKEN_EFFICIENCY.md §5.2) ────────────────────
+// When an instance has composioToolAllowlist set, only listed tools are
+// exposed AND discovery/search is removed — the allowlist itself is the
+// model's map of what exists. Execution/auth infra stays reachable regardless.
+const COMPOSIO_ALLOWLIST_ALWAYS_KEEP = new Set([
+  "COMPOSIO_MULTI_EXECUTE_TOOL",
+  "COMPOSIO_MANAGE_CONNECTIONS",
+  "COMPOSIO_WAIT_FOR_CONNECTIONS",
+]);
+
+/** Tools dropped automatically when an allowlist is active. */
+const COMPOSIO_ALLOWLIST_DROPPED = new Set([
+  "COMPOSIO_SEARCH_TOOLS",
+  "COMPOSIO_GET_TOOL_SCHEMAS",
+]);
+
+/**
+ * Keeps only allowlisted action tools (+ execution/auth infra). Normalizes by
+ * stripping the COMPOSIO_ prefix so slugs and prefixed names both match.
+ * When the allowlist matches nothing (stale), degrades to the full toolset
+ * rather than handing the model a dead tool set.
+ */
+export function filterToolsetByAllowlist(
+  tools: ToolSet,
+  allowlist: string[] | null | undefined,
+): ToolSet {
+  if (!allowlist || allowlist.length === 0) return tools;
+  const wanted = new Set(allowlist.map((n) => n.toUpperCase()));
+  const norm = (name: string) => name.replace(/^COMPOSIO_/, "");
+
+  const filtered: ToolSet = {};
+  let matched = 0;
+  for (const [name, tool] of Object.entries(tools)) {
+    if (COMPOSIO_ALLOWLIST_ALWAYS_KEEP.has(name)) {
+      filtered[name] = tool;
+      continue;
+    }
+    if (COMPOSIO_ALLOWLIST_DROPPED.has(name)) continue;
+    if (wanted.has(norm(name.toUpperCase()))) {
+      filtered[name] = tool;
+      matched++;
+    }
+  }
+  if (matched === 0) {
+    console.warn(
+      `[composio] allowlist (${allowlist.join(", ")}) matched 0 tools — falling back to full toolset`,
+    );
+    return tools;
+  }
+  return filtered;
+}
+
 export function createComposioClient() {
   return new Composio({
     apiKey: env.COMPOSIO_API_KEY,
@@ -52,12 +105,14 @@ export function createComposioClient() {
  * Uses the instance's decrypted per-project API key.
  * Each project must have its own API key for connection isolation.
  */
-export function createComposioClientForInstance(decryptedApiKey?: string | null) {
+export function createComposioClientForInstance(
+  decryptedApiKey?: string | null,
+) {
   if (!decryptedApiKey) {
     throw new Error(
       "No Composio API key configured for this project. " +
-      "Each project requires its own API key for isolated connections. " +
-      "Set a per-project API key in Settings."
+        "Each project requires its own API key for isolated connections. " +
+        "Set a per-project API key in Settings.",
     );
   }
   return new Composio({
@@ -90,11 +145,15 @@ function filterDeniedComposioTools(tools: ToolSet): ToolSet {
     filtered[name] = tool;
   }
   if (dropped.length > 0) {
-    console.log(`[composio] deny-filter dropped ${dropped.length} overlapping tool(s): ${dropped.join(", ")}`);
+    console.log(
+      `[composio] deny-filter dropped ${dropped.length} overlapping tool(s): ${dropped.join(", ")}`,
+    );
   } else {
     // A permanent zero is a signal to investigate (pattern rot), not reassurance —
     // the toolkit should ALSO be disabled on the Composio dashboard side.
-    console.log("[composio] deny-filter: 0 overlapping tools dropped (filetool/code-interpreter not in catalog)");
+    console.log(
+      "[composio] deny-filter: 0 overlapping tools dropped (filetool/code-interpreter not in catalog)",
+    );
   }
   return filtered;
 }
@@ -120,8 +179,27 @@ export async function getOrCreateSessionAndTools(
     const session = await composio.create(instanceId, {
       ...(config ? { manageConnections: config.manageConnections } : {}),
     });
-    const rawTools = (await session.tools()) as ToolSet;
-    return { session, rawTools: filterDeniedComposioTools(rawTools) };
+    let rawTools = await session.tools();
+    rawTools = filterDeniedComposioTools(rawTools);
+
+    // §5.2 — per-project allowlist shrinks the toolset (and kills
+    // SEARCH_TOOLS) when the operator has one configured. Applied INSIDE the
+    // cached bundle; changing the allowlist requires invalidateSession().
+    try {
+      const instance = await db.composioClawInstance.findUnique({
+        where: { id: instanceId },
+        select: { composioToolAllowlist: true },
+      });
+      const allowlist = instance?.composioToolAllowlist as
+        string[] | null | undefined;
+      rawTools = filterToolsetByAllowlist(rawTools, allowlist);
+    } catch (err) {
+      console.error(
+        "[composio] allowlist lookup failed — continuing full:",
+        err,
+      );
+    }
+    return { session, rawTools };
   })();
 
   // Deduplicate concurrent creation for the same instance.
@@ -148,4 +226,3 @@ export async function getOrCreateSessionAndTools(
 export function invalidateSession(instanceId: string): void {
   sessionCache.delete(instanceId);
 }
-

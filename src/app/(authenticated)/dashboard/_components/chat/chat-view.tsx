@@ -170,7 +170,7 @@ export function ChatView() {
               {showInlineVoice ? (
                 <InlineVoiceBar state={voice.state} volume={voice.volume} liveTranscript={voice.liveTranscript} error={voice.voiceError} onStop={handleVoiceStop} />
               ) : (
-                <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} />
+                <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} />
               )}
             </div>
           </div>
@@ -220,7 +220,7 @@ export function ChatView() {
             {showInlineVoice ? (
               <InlineVoiceBar state={voice.state} volume={voice.volume} liveTranscript={voice.liveTranscript} error={voice.voiceError} onStop={handleVoiceStop} />
             ) : (
-              <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} />
+              <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} />
             )}
           </>
         )}

@@ -147,6 +147,12 @@ model ComposioClawInstance {
   identityPrompt  String?
   userPrompt      String?
 
+  // Token-efficiency allowlist (docs/TOKEN_EFFICIENCY.md §5.2): array of
+  // tool names (COMPOSIO_-prefix stripped) this project may expose. Null/empty
+  // = unrestricted (default); when set, non-listed Composio tools are dropped
+  // from the toolset and COMPOSIO_SEARCH_TOOLS is removed entirely.
+  composioToolAllowlist Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -158,6 +164,8 @@ model ComposioClawInstance {
   cronJobs   CronJob[]
   mcpServers McpServer[]
   fileChanges FileChange[]
+  toolResults ToolResult[]
+  toolUsages  ToolUsage[]
 
   @@index([userId])
   @@index([userId, createdAt])
@@ -225,6 +233,7 @@ model Chat {
   messages Message[]
   cronJobs CronJob[]
   fileChanges FileChange[]
+  toolResults ToolResult[]
 
   @@index([instanceId, updatedAt])
   @@map("composio_claw_chat")
@@ -244,6 +253,17 @@ model Message {
   cacheReadTokens  Int?
   cacheWriteTokens Int?
 
+  // Token-efficiency instrumentation (docs/TOKEN_EFFICIENCY.md §0.1) —
+  // per-section payload estimates { system, tools, history, current, toolResults }
+  sectionTokens Json?
+  ttftMs        Int? // first byte of the SSE response stream (null for telegram/cron)
+  genMs         Int? // stream start → onFinish
+  finishReason  String?
+  // Agent-run lifecycle: completed | cancelled | aborted | failed | timed_out.
+  // Set on the assistant row by onFinish/error/abort paths — never leave an
+  // interrupted run as a silent empty message.
+  runStatus String?
+
   createdAt DateTime             @default(now())
   instance  ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   chat      Chat?                @relation(fields: [chatId], references: [id], onDelete: Cascade)
@@ -251,6 +271,36 @@ model Message {
   @@index([instanceId, createdAt])
   @@index([chatId, createdAt])
   @@map("composio_claw_message")
+}
+
+model ToolResult {
+  id         String   @id @default(cuid())
+  instanceId String
+  chatId     String
+  callId     String   @unique
+  toolName   String
+  payload    Json
+  createdAt  DateTime @default(now())
+
+  instance ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  chat     Chat                 @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@index([chatId, createdAt])
+  @@map("composio_claw_tool_result")
+}
+
+model ToolUsage {
+  id         String   @id @default(cuid())
+  instanceId String
+  toolName   String
+  calls      Int      @default(0)
+  successes  Int      @default(0)
+  lastUsedAt DateTime
+
+  instance ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@unique([instanceId, toolName])
+  @@map("composio_claw_tool_usage")
 }
 
 model Memory {

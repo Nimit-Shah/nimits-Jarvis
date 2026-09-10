@@ -3,13 +3,30 @@ import { smoothStream, UI_MESSAGE_STREAM_HEADERS } from "ai";
 import { z } from "zod";
 import { auth } from "~/server/auth";
 import { prepareAgentRun } from "~/server/api/routers/nimits-jarvis/agent/setup";
-import type { PIIVault } from "~/server/api/routers/nimits-jarvis/agent/pii";
+import { PIIVault } from "~/server/api/routers/nimits-jarvis/agent/pii";
+import { decrypt } from "~/lib/crypto";
 import { stripResidualTokens } from "~/server/api/routers/nimits-jarvis/agent/pii/brands";
 import { prewarmDeBERTa } from "~/server/api/routers/nimits-jarvis/agent/pii/deberta-classifier";
 import {
-  setStreamingMessage,
+  claimChatRun,
+  claimIdempotencyKey,
+  clearVaultSnapshot,
   getStreamingMessage,
+  getVaultSnapshot,
+  peekIdempotencyKey,
+  persistVaultSnapshot,
+  releaseChatRun,
+  setRunAssistant,
+  takeRunAssistant,
 } from "~/server/clients/redis";
+import {
+  armRunTimeout,
+  canBackground,
+  cancelRun,
+  registerRun,
+  releaseRun,
+  startRunHeartbeat,
+} from "~/server/lib/run-registry";
 import { rateLimit } from "~/server/clients/rate-limit";
 import { getStreamContext } from "./stream-store";
 import { TRPCError } from "@trpc/server";
@@ -33,50 +50,18 @@ const chatRequestBody = z.object({
   // instance ceiling in prepareAgentRun (resolveFsMode). Unknown values are
   // rejected, not coerced.
   fsAccessMode: z.enum(["read-only", "full"]).optional(),
+  // Client-generated UUID per send. Retried/double-fired submits sharing one
+  // key attach to the first run instead of starting a second one.
+  idempotencyKey: z.string().max(128).optional(),
 });
-
-async function resolveChatId(instanceId: string, chatId?: string): Promise<string> {
-  if (chatId) {
-    const chat = await db.chat.findFirst({
-      where: { id: chatId, instanceId },
-      select: { id: true },
-    });
-    if (chat) return chat.id;
-  }
-
-  const firstChat = await db.chat.findFirst({
-    where: { instanceId },
-    orderBy: { createdAt: "asc" },
-    select: { id: true },
-  });
-
-  if (!firstChat) {
-    const instance = await db.composioClawInstance.findUnique({
-      where: { id: instanceId },
-      select: { anthropicModel: true },
-    });
-
-    const createdChat = await db.chat.create({
-      data: {
-        instanceId,
-        name: "New Chat",
-        model: instance?.anthropicModel ?? "claude-3-7-sonnet-20250219",
-      },
-      select: { id: true },
-    });
-
-    return createdChat.id;
-  }
-
-  return firstChat.id;
-}
 
 /**
  * PII token pattern for detecting partial tokens at chunk boundaries.
  * Matches both bracket tokens [CLAW_TYPE_HASH] and email tokens CLAW_EMAIL_hash@trustclaw.anon.
  * Note: [A-Z_]+ matches multi-word types (PERSON_NAME, CREDIT_CARD, etc.).
  */
-const PII_TOKEN_RE = /(?:\[CLAW_[A-Z_]+_[A-F0-9]{4}\]|CLAW_EMAIL_[A-F0-9]{4}@trustclaw\.anon)/g;
+const PII_TOKEN_RE =
+  /(?:\[CLAW_[A-Z_]+_[A-F0-9]{4}\]|CLAW_EMAIL_[A-F0-9]{4}@trustclaw\.anon)/g;
 
 /**
  * Checks if the tail of a string starts what looks like a partial PII token.
@@ -124,7 +109,9 @@ function createPIIRestoreTransform(
       const safe = buffer.slice(0, buffer.length - carryOver.length);
       buffer = carryOver;
       if (safe) {
-        controller.enqueue(encoder.encode(stripResidualTokens(vault.restore(safe))));
+        controller.enqueue(
+          encoder.encode(stripResidualTokens(vault.restore(safe))),
+        );
       }
     },
     flush(controller) {
@@ -168,6 +155,27 @@ function createPIIRestoreStringTransform(
 }
 
 export const maxDuration = 300;
+
+/**
+ * Records the latency from stream start to the first outbound SSE byte —
+ * a server-side proxy for TTFT (§0.1 instrumentation). Side-effect free:
+ * every chunk passes through untouched.
+ */
+function firstByteTimingTransform(
+  record: (ms: number) => void,
+): TransformStream<Uint8Array, Uint8Array> {
+  let started = false;
+  const t0 = Date.now();
+  return new TransformStream({
+    transform(chunk, controller) {
+      if (!started) {
+        started = true;
+        record(Date.now() - t0);
+      }
+      controller.enqueue(chunk);
+    },
+  });
+}
 
 export async function POST(request: Request) {
   // Pre-warm DeBERTa model on first request (non-blocking)
@@ -226,7 +234,11 @@ export async function POST(request: Request) {
   if (chatId) {
     const chat = await db.chat.findUnique({
       where: { id: chatId },
-      select: { id: true, instanceId: true, instance: { select: { userId: true } } },
+      select: {
+        id: true,
+        instanceId: true,
+        instance: { select: { userId: true } },
+      },
     });
 
     if (!chat || chat.instance.userId !== userId) {
@@ -241,52 +253,219 @@ export async function POST(request: Request) {
     instanceId = instance.id;
   }
 
+  // Lazy thread creation: an unsaved New Chat posts without a chatId and
+  // the thread is born here, on the first submitted message — never before.
+  let createdHere = false;
   if (!chatId) {
-    chatId = await resolveChatId(instanceId);
+    const instance = await db.composioClawInstance.findUnique({
+      where: { id: instanceId },
+      select: { anthropicModel: true },
+    });
+    const createdChat = await db.chat.create({
+      data: {
+        instanceId,
+        name: "New Chat",
+        model: instance?.anthropicModel ?? "claude-3-7-sonnet-20250219",
+      },
+      select: { id: true },
+    });
+    chatId = createdChat.id;
+    createdHere = true;
   }
 
-  const prepareResult = await prepareAgentRun({
-    instanceId,
-    chatId,
-    userMessage: userText,
-    source: "web",
-    isVoice: body.data.isVoice ?? false,
-    fsAccessMode: body.data.fsAccessMode,
+  const streamId = crypto.randomUUID();
+
+  // Idempotency, part 1 (read-only probe): a retried/double-fired submit
+  // reuses the first run's ids so the client can attach instead of spawning
+  // a second agent. No rows are written on this path.
+  if (body.data.idempotencyKey) {
+    const prior = await peekIdempotencyKey(body.data.idempotencyKey);
+    if (prior) {
+      console.log("[chat] duplicate submit deduplicated (peek)", {
+        chatId: prior.chatId,
+        streamId: prior.streamId,
+      });
+      return new Response(
+        JSON.stringify({
+          error: "run_in_progress",
+          activeStreamId: prior.streamId,
+          chatId: prior.chatId,
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      );
+    }
+  }
+  // Idempotency, part 2 (winning claim with the now-known chatId). Losing
+  // a race here means a twin request already owns this key: drop any
+  // just-created orphan thread and attach to the winner.
+  if (body.data.idempotencyKey) {
+    const winner = await claimIdempotencyKey(
+      body.data.idempotencyKey,
+      streamId,
+      chatId,
+    );
+    if (winner) {
+      console.log("[chat] duplicate submit deduplicated (claim)", {
+        chatId: winner.chatId,
+        streamId: winner.streamId,
+      });
+      if (createdHere) {
+        await db.chat.delete({ where: { id: chatId } }).catch(() => {
+          // Best-effort orphan cleanup; TTL + cascade cover the rest.
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          error: "run_in_progress",
+          activeStreamId: winner.streamId,
+          chatId: winner.chatId,
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      );
+    }
+  }
+
+  // In-flight guard: one agent run per chat. Claim BEFORE prepareAgentRun
+  // (which writes the user row) so a rejected submit leaves no trace.
+  const claimed = await claimChatRun(chatId, streamId);
+  if (!claimed) {
+    const active = await getStreamingMessage(chatId);
+    console.log("[chat] concurrent POST rejected", { chatId, active });
+    return new Response(
+      JSON.stringify({
+        error: "run_in_progress",
+        activeStreamId: active,
+        chatId,
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  let prepareResult;
+  try {
+    prepareResult = await prepareAgentRun({
+      instanceId,
+      chatId,
+      userMessage: userText,
+      source: "web",
+      isVoice: body.data.isVoice ?? false,
+      fsAccessMode: body.data.fsAccessMode,
+      streamId,
+    });
+  } catch (error) {
+    // prepareAgentRun writes rows before it can fail — release the claim so
+    // the chat is not blocked, then propagate the failure.
+    console.error("[chat] prepareAgentRun failed:", error);
+    releaseRun(streamId);
+    await releaseChatRun(chatId, streamId);
+    throw error;
+  }
+
+  const { agent, messages, piiVault, metrics, assistantMessageId } =
+    prepareResult.result;
+
+  const markRunStatus = async (runStatus: string) => {
+    try {
+      const row = await db.message.findUnique({
+        where: { id: assistantMessageId },
+        select: { runStatus: true },
+      });
+      // Never overwrite a terminal state written by onFinish.
+      if (!row?.runStatus) {
+        await db.message.update({
+          where: { id: assistantMessageId },
+          data: { runStatus },
+        });
+      }
+    } catch (err) {
+      console.error("[chat] run-status marking failed:", err);
+    }
+  };
+
+  const runController = registerRun(streamId);
+  startRunHeartbeat(chatId, streamId);
+  // Link the stream to its pre-created assistant row for out-of-band
+  // terminal marking (explicit cancel).
+  await setRunAssistant(streamId, assistantMessageId);
+  // Watchdog fires just before the route's maxDuration cap (300s) so an
+  // over-long run is marked timed_out instead of dying silently.
+  armRunTimeout(streamId, 290_000, () => {
+    console.warn("[chat] run exceeded duration cap", { chatId, streamId });
+    void (async () => {
+      await markRunStatus("timed_out");
+      cancelRun(streamId);
+      await releaseChatRun(chatId, streamId);
+    })();
   });
 
-  const { agent, messages, piiVault } = prepareResult.result;
+  // Client disconnect: in background-capable runtimes the run continues
+  // (chat switches unmount the stream without killing it); otherwise the
+  // disconnect aborts generation with it. Either way the row must never be
+  // a silent empty message.
+  request.signal.addEventListener("abort", () => {
+    if (canBackground) {
+      console.info("[chat] client disconnected, run continues in background", {
+        chatId,
+        streamId,
+      });
+      return;
+    }
+    console.info("[chat] client disconnected mid-run", { chatId, streamId });
+    void (async () => {
+      await markRunStatus("aborted");
+      releaseRun(streamId);
+      await releaseChatRun(chatId, streamId);
+    })();
+  });
 
-  const streamId = crypto.randomUUID();
-  await setStreamingMessage(chatId, streamId);
+  // agent.stream() returns streamText() result - supports toUIMessageStreamResponse.
+  // The run listens to the registry controller where background continuation
+  // is possible, else to the request (serverless: the run cannot outlive it).
+  const runSignal = canBackground ? runController.signal : request.signal;
+  let result;
+  try {
+    result = await agent.stream({
+      prompt: messages,
+      experimental_transform: smoothStream(),
+      abortSignal: runSignal,
+    });
+  } catch (error) {
+    console.error("[chat] agent.stream failed:", error);
+    releaseRun(streamId);
+    await releaseChatRun(chatId, streamId);
+    await markRunStatus("failed");
+    return new Response("Generation failed", { status: 500 });
+  }
 
-  // agent.stream() returns streamText() result - supports toUIMessageStreamResponse
-  // Pass request.signal so the agent stops when the client disconnects (stop button)
-  const result = await agent.stream({
-    prompt: messages,
-    experimental_transform: smoothStream(),
-    abortSignal: request.signal,
+  const firstByte = firstByteTimingTransform((ms) => {
+    metrics.ttftMs = ms;
   });
 
   const streamContext = getStreamContext();
   const response = result.toUIMessageStreamResponse({
     headers: {
       "X-Stream-Id": streamId,
+      // Lets an unsaved New Chat client learn its fresh thread id and
+      // navigate to it once the first response completes.
+      "X-Chat-Id": chatId,
     },
     ...(streamContext
       ? {
           consumeSseStream: ({ stream }) => {
-            const finalStream = piiVault
-              ? stream.pipeThrough(createPIIRestoreStringTransform(piiVault))
-              : stream;
-
-            void streamContext.createNewResumableStream(
-              streamId,
-              () => finalStream,
-            );
+            // Store the TOKENIZED stream — PII is restored on the live
+            // response path below and on GET resume, never before persisting.
+            void streamContext.createNewResumableStream(streamId, () => stream);
           },
         }
       : {}),
   });
+
+  // Persist the vault's prep-time mappings (encrypted) so a resumed stream
+  // can restore tokens on read. onFinish overwrites this with the final
+  // mappings once streaming registrations are complete.
+  if (piiVault) {
+    void persistVaultSnapshot(streamId, piiVault);
+  }
 
   // Whenever a vault is active (and even when it has no new registrations this
   // request), wrap the response body with a transform that restores PII tokens
@@ -295,10 +474,19 @@ export async function POST(request: Request) {
   // "[CLAW_PERSON_NAME_542F] sent you a message" which we rewrite to
   // "John Doe sent you a message".
   if (piiVault && response.body) {
-    const restored = response.body.pipeThrough(
-      createPIIRestoreTransform(piiVault),
-    );
+    const restored = response.body
+      .pipeThrough(firstByte)
+      .pipeThrough(createPIIRestoreTransform(piiVault));
     return new Response(restored, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+
+  if (response.body) {
+    const timed = response.body.pipeThrough(firstByte);
+    return new Response(timed, {
       status: response.status,
       statusText: response.statusText,
       headers: response.headers,
@@ -318,7 +506,6 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const streamId = url.searchParams.get("streamId");
   const chatIdParam = url.searchParams.get("chatId");
-  const instanceIdParam = url.searchParams.get("instanceId");
 
   if (!streamId) {
     return new Response("Missing streamId", { status: 400 });
@@ -338,8 +525,7 @@ export async function GET(request: Request) {
 
     chatId = chat.id;
   } else {
-    const instance = await getInstanceForUser(userId, instanceIdParam ?? undefined);
-    chatId = await resolveChatId(instance.id);
+    return new Response("Missing chatId", { status: 400 });
   }
 
   const activeStreamId = await getStreamingMessage(chatId);
@@ -356,7 +542,86 @@ export async function GET(request: Request) {
     return new Response("Stream already completed", { status: 204 });
   }
 
-  return new Response(stream.pipeThrough(new TextEncoderStream()), {
+  // The stored stream is tokenized — restore PII on the way out using this
+  // run's encrypted vault snapshot. Without a snapshot, serve as-is.
+  let out: ReadableStream<string> = stream;
+  try {
+    const encrypted = await getVaultSnapshot(streamId);
+    if (encrypted) {
+      const snap: unknown = JSON.parse(await decrypt(encrypted));
+      const vault = PIIVault.fromSnapshot(snap);
+      if (vault) {
+        out = stream.pipeThrough(createPIIRestoreStringTransform(vault));
+      }
+    }
+  } catch (err) {
+    console.error("[chat] resume restore failed — serving tokenized:", err);
+  }
+
+  return new Response(out.pipeThrough(new TextEncoderStream()), {
     headers: UI_MESSAGE_STREAM_HEADERS,
+  });
+}
+
+export async function DELETE(request: Request) {
+  const session = await auth.api.getSession({ headers: request.headers });
+  if (!session) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  const userId = session.user.id;
+  const url = new URL(request.url);
+  const chatId = url.searchParams.get("chatId");
+  const streamId = url.searchParams.get("streamId");
+
+  if (!chatId || !streamId) {
+    return new Response("Missing chatId or streamId", { status: 400 });
+  }
+
+  const chat = await db.chat.findUnique({
+    where: { id: chatId },
+    select: { id: true, instance: { select: { userId: true } } },
+  });
+
+  if (!chat || chat.instance.userId !== userId) {
+    return new Response("Chat not found", { status: 404 });
+  }
+
+  // Only cancel the run this key actually points at.
+  const active = await getStreamingMessage(chatId);
+  if (active && active !== streamId) {
+    return new Response(
+      JSON.stringify({ error: "run_in_progress", activeStreamId: active }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  console.info("[chat] run cancelled by user", { chatId, streamId });
+  cancelRun(streamId);
+  await releaseChatRun(chatId, streamId);
+  await clearVaultSnapshot(streamId);
+
+  // Mark exactly this run's assistant row cancelled — unless it already
+  // reached a terminal state (completion raced the cancel).
+  const messageId = await takeRunAssistant(streamId);
+  if (messageId) {
+    try {
+      const row = await db.message.findUnique({
+        where: { id: messageId },
+        select: { runStatus: true },
+      });
+      if (row && !row.runStatus) {
+        await db.message.update({
+          where: { id: messageId },
+          data: { runStatus: "cancelled" },
+        });
+      }
+    } catch (err) {
+      console.error("[chat] cancel marking failed:", err);
+    }
+  }
+
+  return new Response(JSON.stringify({ ok: true, canBackground }), {
+    headers: { "Content-Type": "application/json" },
   });
 }

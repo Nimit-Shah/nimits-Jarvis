@@ -9,6 +9,7 @@ import { createFsWriteTool } from "./fs/write";
 import { createFsDeleteTool } from "./fs/delete";
 import { createFsMkdirTool } from "./fs/mkdir";
 import { createFsMoveTool } from "./fs/move";
+import { createReadToolResultTool } from "./read-tool-result";
 import { DEFAULT_TIMEZONE } from "~/lib/timezone";
 import type { FsAccessMode } from "../types";
 export {
@@ -36,6 +37,7 @@ export function createCustomTools(
     memory_save: createMemorySaveTool(instanceId),
     memory_search: createMemorySearchTool(instanceId),
     schedule: createScheduleTool(instanceId, chatId ?? "", userTimezone),
+    read_tool_result: createReadToolResultTool(instanceId),
     // Availability filtering — absent from the toolset when disabled, never
     // rejected at runtime. A tool the model cannot see cannot be called.
     ...(fs?.fsReadEnabled
