@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { trpc } from "~/clients/trpc";
 import { Switch } from "~/components/ui/switch";
 import { Label } from "~/components/ui/label";
@@ -42,7 +43,7 @@ export function McpServerToolsList({ serverId, enabled }: { serverId: string; en
           <div key={tool.id} className="flex items-start justify-between gap-2 rounded-md border px-3 py-2">
             <div className="min-w-0 flex-1">
               <p className="text-foreground truncate text-xs font-medium">{tool.originalName}</p>
-              {tool.description && <p className="text-muted-foreground line-clamp-2 text-xs">{tool.description.slice(0, 120)}</p>}
+              {tool.description && <McpToolDescription description={tool.description} />}
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {!enabled ? null : (
@@ -59,6 +60,29 @@ export function McpServerToolsList({ serverId, enabled }: { serverId: string; en
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/** Descriptions longer than ~2 lines render clamped with an inline read more / show less toggle. */
+const READ_MORE_THRESHOLD = 140;
+
+function McpToolDescription({ description }: { description: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const overflowing = description.length > READ_MORE_THRESHOLD;
+
+  return (
+    <div>
+      <p className={`text-muted-foreground text-xs ${expanded ? "" : "line-clamp-2"}`}>{description}</p>
+      {overflowing && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="text-xs underline underline-offset-2 text-muted-foreground hover:text-foreground"
+        >
+          {expanded ? "show less" : "read more"}
+        </button>
+      )}
     </div>
   );
 }
