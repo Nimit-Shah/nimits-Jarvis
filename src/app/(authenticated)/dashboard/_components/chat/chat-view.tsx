@@ -63,8 +63,10 @@ export function ChatView() {
   }, [messages]);
 
   const handleSend = useCallback(
-    (text: string, fsAccessMode?: "read-only" | "full") => {
-      const result = sendMessage(text, fsAccessMode);
+    (text: string, fsAccessMode?: "read-only" | "full", pins?: string[]) => {
+      const result = sendMessage(text, fsAccessMode, pins);
+      // Pins are per-message: clear on send (and on chat switch below).
+      setPinnedSkills([]);
       requestAnimationFrame(() => {
         virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
       });
@@ -106,6 +108,16 @@ export function ChatView() {
   const [fsMode, setFsMode] = useState<"read-only" | "full">("read-only");
   // Layer 2 rule: reset to read-only on every new chat.
   useEffect(() => { setFsMode("read-only"); }, [chatId]);
+
+  // ── Skill pins (Part IV) — per-message, never sticky ──
+  const [pinnedSkills, setPinnedSkills] = useState<string[]>([]);
+  useEffect(() => { setPinnedSkills([]); }, [chatId]);
+  const togglePin = useCallback((slug: string) => {
+    setPinnedSkills((prev) =>
+      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
+    );
+  }, []);
+  const clearPins = useCallback(() => setPinnedSkills([]), []);
 
   // --- Claude-exact inline voice session (scratch) — replaces old overlay hook ---
   const voice = useVoiceSession({
@@ -170,7 +182,7 @@ export function ChatView() {
               {showInlineVoice ? (
                 <InlineVoiceBar state={voice.state} volume={voice.volume} liveTranscript={voice.liveTranscript} error={voice.voiceError} onStop={handleVoiceStop} />
               ) : (
-                <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} />
+                <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} skillsPin={{ pinned: pinnedSkills, onToggle: togglePin, onClear: clearPins }} />
               )}
             </div>
           </div>
@@ -220,7 +232,7 @@ export function ChatView() {
             {showInlineVoice ? (
               <InlineVoiceBar state={voice.state} volume={voice.volume} liveTranscript={voice.liveTranscript} error={voice.voiceError} onStop={handleVoiceStop} />
             ) : (
-              <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} />
+              <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} skillsPin={{ pinned: pinnedSkills, onToggle: togglePin, onClear: clearPins }} />
             )}
           </>
         )}

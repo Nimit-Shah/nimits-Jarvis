@@ -234,6 +234,7 @@ model Chat {
   cronJobs CronJob[]
   fileChanges FileChange[]
   toolResults ToolResult[]
+  skillConsents SkillConsent[]
 
   @@index([instanceId, updatedAt])
   @@map("composio_claw_chat")
@@ -391,4 +392,82 @@ model OnboardingState {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("onboarding_state")
+}
+
+// Part IV — Jarvis Skills. Instructions live on the filesystem (source of
+// record for content); Postgres is the index of record for discovery.
+model Skill {
+  id         String  @id @default(cuid())
+  userId     String
+  instanceId String? // null = available to every project for this user
+
+  slug        String // stable, from frontmatter name
+  displayName String
+  description String @db.Text // routing signal; goes in the Tier-1 index
+  origin      String // authored | imported | bundled
+  sourceRepo  String?
+  sourceRef   String? // commit or tag
+  dirPath     String // <skillsRoot>/<slug>/ — SKILL.md plus assets
+  contentHash String // sha256 of SKILL.md, for change detection
+  version     String?
+
+  trustTier     String   @default("untrusted") // untrusted | verified | trusted
+  toolsRequired String[] // exact tool names; acts as a CAP (Phase 2)
+  stateScope    String   @default("none") // none | session | persistent
+
+  scanFindings Json? // Phase 2 static-scan findings, shown in Settings
+
+  // Phase 8 auto-discovery audit trail — manual imports leave these null.
+  discoverySource String? // "auto" | "manual"
+  discoveryQuery  String? // the find_skill query that led here ("auto" only)
+
+  enabled    Boolean   @default(true)
+  lastUsedAt DateTime?
+  useCount   Int       @default(0)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  states SkillState[]
+
+  @@unique([userId, slug])
+  @@index([userId, enabled])
+  @@map("composio_claw_skill")
+}
+
+model SkillState {
+  id      String @id @default(cuid())
+  skillId String  // Scope key with empty-string sentinels (never null) so the composite
+  // unique stays enforceable — Postgres treats NULL as distinct, which would
+  // let duplicate persistent rows (null chatId) slip through. Session scope
+  // sets chatId, persistent scope sets instanceId, the unused half stays "".
+  chatId     String @default("")
+  instanceId String @default("")
+  data       Json
+
+  updatedAt DateTime @updatedAt
+
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([skillId, chatId, instanceId])
+  @@map("composio_claw_skill_state")
+}
+
+// Phase 8 conversational consent: an auto-installed (untrusted) skill becomes
+// usable only after a recorded affirmative reply in the same chat. One row per
+// chat+slug; audit trail is kept, never deleted. Consent applies to the single
+// next user message after install (stale pendings never auto-fire).
+model SkillConsent {
+  id     String @id @default(cuid())
+  chatId String
+  slug   String
+  status String @default("pending") // pending | confirmed | declined
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@unique([chatId, slug])
+  @@index([chatId, status])
+  @@map("composio_claw_skill_consent")
 }

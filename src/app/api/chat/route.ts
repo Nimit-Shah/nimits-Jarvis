@@ -50,6 +50,9 @@ const chatRequestBody = z.object({
   // instance ceiling in prepareAgentRun (resolveFsMode). Unknown values are
   // rejected, not coerced.
   fsAccessMode: z.enum(["read-only", "full"]).optional(),
+  // Skills pinned from the composer menu for this message. Validated
+  // server-side against the user's own rows; stale/foreign slugs dropped.
+  pinnedSkills: z.array(z.string().min(1).max(64)).max(10).optional(),
   // Client-generated UUID per send. Retried/double-fired submits sharing one
   // key attach to the first run instead of starting a second one.
   idempotencyKey: z.string().max(128).optional(),
@@ -350,6 +353,7 @@ export async function POST(request: Request) {
       source: "web",
       isVoice: body.data.isVoice ?? false,
       fsAccessMode: body.data.fsAccessMode,
+      pinnedSkills: body.data.pinnedSkills,
       streamId,
     });
   } catch (error) {

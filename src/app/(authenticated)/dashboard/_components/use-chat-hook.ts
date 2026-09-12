@@ -125,6 +125,10 @@ export function useChatHook({
           fsAccessMode:
             (body as { fsAccessMode?: "read-only" | "full" } | undefined)
               ?.fsAccessMode ?? "read-only",
+          // Skills pinned from the composer menu — per-message, never sticky.
+          // Validated server-side; see agent/setup.ts pinnedSkills.
+          pinnedSkills:
+            (body as { pinnedSkills?: string[] } | undefined)?.pinnedSkills,
         },
       }),
       prepareReconnectToStreamRequest: () => ({
@@ -237,17 +241,24 @@ export function useChatHook({
   const sendMessageRef = useRef(chat.sendMessage);
   sendMessageRef.current = chat.sendMessage;
 
-  // Standard text-mode send — isVoice always false, fs mode passed through.
-  // Each send carries a fresh idempotency key so a retried/double-fired
-  // submit attaches to the first run instead of starting a second one.
+  // Standard text-mode send — isVoice always false, fs mode + skill pins
+  // passed through. Each send carries a fresh idempotency key so a
+  // retried/double-fired submit attaches to the first run instead of
+  // starting a second one.
   const sendMessage = useCallback(
-    (text: string, fsAccessMode?: "read-only" | "full") => {
+    (
+      text: string,
+      fsAccessMode?: "read-only" | "full",
+      pinnedSkills?: string[],
+    ) => {
       void sendMessageRef.current(
         { text },
         {
           body: {
             isVoice: false,
             fsAccessMode,
+            pinnedSkills:
+              pinnedSkills && pinnedSkills.length > 0 ? pinnedSkills : undefined,
             idempotencyKey: crypto.randomUUID(),
           },
         },

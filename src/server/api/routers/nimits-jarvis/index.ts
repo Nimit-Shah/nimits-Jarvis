@@ -20,6 +20,14 @@ import { getLocalModels } from "./getLocalModels";
 import { executeFileChange } from "./executeFileChange";
 import { undoFileChange } from "./undoFileChange";
 import { getFileChange } from "./getFileChange";
+import { listSkills } from "./listSkills";
+import { getSkill } from "./getSkill";
+import { updateSkill } from "./updateSkill";
+import { updateSkillBody } from "./updateSkillBody";
+import { deleteSkill } from "./deleteSkill";
+import { createSkill } from "./createSkill";
+import { importSkill } from "./importSkill";
+import { getDiscover } from "./getDiscover";
 
 export const nimitsJarvisRouter = router({
   getInstance,
@@ -43,5 +51,13 @@ export const nimitsJarvisRouter = router({
   executeFileChange,
   undoFileChange,
   getFileChange,
+  listSkills,
+  getSkill,
+  updateSkill,
+  updateSkillBody,
+  deleteSkill,
+  createSkill,
+  importSkill,
+  getDiscover,
 });
 

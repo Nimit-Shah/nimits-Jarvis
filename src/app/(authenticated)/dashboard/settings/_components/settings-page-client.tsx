@@ -11,6 +11,7 @@ import {
   Mic,
   FolderOpen,
   Palette,
+  FileText,
 } from "lucide-react";
 import { trpc } from "~/clients/trpc";
 import Link from "next/link";
@@ -27,8 +28,9 @@ import { FsSettings } from "./fs-settings";
 import { ThemeSettings } from "./theme-settings";
 import { useInstanceId } from "~/hooks/use-instance-id";
 import { McpServersPanel } from "./mcp/mcp-servers-panel";
+import { SkillsSettings } from "./skills-settings";
 
-type SettingsCategory = "security" | "appearance" | "voice" | "files" | "telegram" | "cron" | "memory" | "mcp" | "danger";
+type SettingsCategory = "security" | "appearance" | "voice" | "files" | "telegram" | "cron" | "memory" | "mcp" | "skills" | "danger";
 
 const CATEGORIES: Array<{
   id: SettingsCategory;
@@ -85,6 +87,12 @@ const CATEGORIES: Array<{
     description: "External MCP endpoints (per project)",
   },
   {
+    id: "skills",
+    label: "Skills",
+    icon: FileText,
+    description: "Reusable instruction sets for the agent",
+  },
+  {
     id: "danger",
     label: "Danger Zone",
     icon: AlertTriangle,
@@ -96,6 +104,23 @@ export function SettingsPageClient() {
   const [instanceId] = useInstanceId();
   const [activeCategory, setActiveCategory] =
     useState<SettingsCategory>("security");
+  const [skillsTab, setSkillsTab] = useState<"mine" | "discover">("mine");
+  // Deep links: #skills and #skills-discover (composer menu Manage/Browse).
+  // Hash-based (not search params) so no Suspense boundary is needed.
+  useEffect(() => {
+    const applyHash = () => {
+      if (window.location.hash === "#skills-discover") {
+        setActiveCategory("skills");
+        setSkillsTab("discover");
+      } else if (window.location.hash === "#skills") {
+        setActiveCategory("skills");
+        setSkillsTab("mine");
+      }
+    };
+    applyHash();
+    window.addEventListener("hashchange", applyHash);
+    return () => window.removeEventListener("hashchange", applyHash);
+  }, []);
   // Gate content on mount: the server always renders the loading skeleton
   // (no ?instance= param, no query cache), but on client-side navigation the
   // cache may already be warm — rendering content on the first client pass
@@ -255,6 +280,12 @@ export function SettingsPageClient() {
                 fsWriteAllowed={(instance as any).fsWriteAllowed ?? false}
                 fsRootPath={(instance as any).fsRootPath ?? null}
               />
+            </ErrorBoundary>
+          )}
+
+          {activeCategory === "skills" && (
+            <ErrorBoundary>
+              <SkillsSettings initialTab={skillsTab} />
             </ErrorBoundary>
           )}
 

@@ -66,6 +66,17 @@ import { MAX_AUTO_WRITES_PER_MESSAGE } from "~/server/lib/fs-access/write-paths"
 import type { ReconstructedMessage, FsAccessMode } from "./types";
 import { getModelProvider, isAnthropicModel, buildLLM } from "./model-utils";
 import { optimizeToolSchemas } from "./tool-optimizer";
+import { applySkillToolCap } from "~/server/lib/skills/cap";
+import {
+  formatPinnedSkillBlock,
+} from "~/server/lib/skills/materialize";
+import { resolvePinnedSkills } from "~/server/lib/skills/pins";
+import { resolveConsentedSkills } from "~/server/lib/skills/consent";
+import {
+  extractSkillStateUpdates,
+  saveSkillState,
+} from "~/server/lib/skills/state";
+import { splitSkillTools } from "./tools/load-skill";
 import {
   PIIVault,
   PIITransportShield,
@@ -322,6 +333,14 @@ interface PrepareAgentRunParams {
   isVoice?: boolean;
   fsAccessMode?: FsAccessMode; // defaults to "read-only" via resolveFsMode when absent
   /**
+   * Slugs pinned from the composer menu for this message. Validated against
+   * the user's own Skill rows (unknown/unowned slugs dropped silently so a
+   * stale client cannot probe). Per-message, never sticky. Ignored unless
+   * source === "web" — cron/telegram cannot pin, so only trusted skills are
+   * reachable there by construction.
+   */
+  pinnedSkills?: string[];
+  /**
    * Web-chat run id (the SSE streamId). Passed so onFinish can release the
    * process-local run entry (heartbeat) and so callers can mark terminal
    * state on abort. Optional — telegram/cron runs don't have one.
@@ -364,6 +383,7 @@ export async function prepareAgentRun(
     userMessageType,
     isVoice,
     fsAccessMode,
+    pinnedSkills,
     streamId,
   } = params;
   const t0 = performance.now();
@@ -411,6 +431,50 @@ export async function prepareAgentRun(
 
   const userTimezone = user?.timezone ?? DEFAULT_TIMEZONE;
   mark("db: instance+chat+user");
+
+  // Tier-1 skill index (§3.1): enabled trusted + verified skills for this
+  // user (global or this instance), sorted by slug for byte-stability.
+  // Untrusted skills never appear — they are pin-only (§5.1).
+  const skillIndexRows = await db.skill.findMany({
+    where: {
+      userId: instance.userId,
+      enabled: true,
+      trustTier: { in: ["trusted", "verified"] },
+      OR: [{ instanceId: null }, { instanceId }],
+    },
+    select: { slug: true, description: true, trustTier: true },
+    orderBy: { slug: "asc" },
+  });
+  mark("db: skills index");
+
+  // Pinned skills (§3.3): validate ownership (query scopes to this user) +
+  // instance scope, then materialize instructions. Unknown, unowned,
+  // disabled, or out-of-instance slugs are dropped silently.
+  // loadedSkillSlugs is shared with fs tools: pinned slugs' references/ are
+  // readable now; a mid-turn load_skill adds more slugs to the same Set.
+  const { pins: validPins, loadedSlugs: loadedSkillSlugs } =
+    await resolvePinnedSkills({
+      userId: instance.userId,
+      instanceId,
+      chatId,
+      source,
+      slugs: pinnedSkills ?? [],
+    });
+
+  // Conversational consent (Phase 8): an affirmative reply to last turn's
+  // install presentation pins the skill for this turn through the same path.
+  // Silence or a changed subject never consents — default deny.
+  const { pins: consentedPins } = await resolveConsentedSkills({
+    userId: instance.userId,
+    instanceId,
+    chatId,
+    source,
+    userMessage,
+  });
+  for (const p of consentedPins) {
+    if (!validPins.some((v) => v.slug === p.slug)) validPins.push(p);
+    loadedSkillSlugs.add(p.slug);
+  }
 
   const provider = getModelProvider(chat.model);
   const isOllama = provider === "ollama";
@@ -475,6 +539,11 @@ export async function prepareAgentRun(
       isVoice: isVoice ?? false,
       fsReadEnabled: instance.fsReadEnabled,
       fsMode,
+      availableSkills: skillIndexRows.map((r) => ({
+        slug: r.slug,
+        description: r.description,
+        pinOnly: r.trustTier !== "trusted",
+      })),
     }),
   );
 
@@ -593,6 +662,9 @@ export async function prepareAgentRun(
   // Deterministic merge: tool KEYS are sorted so serialization is byte-stable
   // across requests (§3.2) — provider cache prefix cannot be invalidated by a
   // reordering session.tools()/MCP sync.
+  // load_skill reports toolsAvailable/toolsMissing against the turn's real
+  // ToolSet — populated with the assembled keys below, before wrapping.
+  const skillToolNamesRef = { current: [] as string[] };
   const customTools = createCustomTools(instanceId, chatId, userTimezone, {
     fsReadEnabled: instance.fsReadEnabled,
     fsMode,
@@ -601,13 +673,54 @@ export async function prepareAgentRun(
     chatId,
     // Blast-radius budget for auto-writes (B1). One logical change per message.
     changeBudget: { remaining: MAX_AUTO_WRITES_PER_MESSAGE },
-  });
+    // Pinned (and mid-turn loaded) skills' references/ stay readable.
+    allowedSkillSlugs: loadedSkillSlugs,
+  }, skillIndexRows.length > 0 || source === "web" ? {
+    userId: instance.userId,
+    instanceId,
+    chatId,
+    toolNamesRef: skillToolNamesRef,
+    loadedSlugs: loadedSkillSlugs,
+    hasIndex: skillIndexRows.length > 0,
+    source,
+  } : undefined);
   const allToolsUnordered: ToolSet = { ...optimized, ...customTools };
   const allTools: ToolSet = Object.fromEntries(
     Object.keys(allToolsUnordered)
       .sort()
       .map((k) => [k, allToolsUnordered[k]!]),
   ) as ToolSet;
+
+  // Skill tool cap (§5.2): with a non-trusted skill pinned, the turn sees the
+  // intersection of its ToolSet and the declared lists, plus the always-on
+  // core. Trusted-only (or no) pins leave the set untouched. Computed before
+  // the single wrapToolExecutors merge point — never mid-turn.
+  const cappedTools = applySkillToolCap(
+    allTools,
+    validPins.map((p) => ({ trustTier: p.trustTier, toolsRequired: p.toolsRequired })),
+  );
+  skillToolNamesRef.current = Object.keys(cappedTools);
+
+  // Pinned-skill tail blocks (§3.3): instruction text assembled against the
+  // capped (real) ToolSet, appended post-shield so it is never redacted.
+  let pinnedBlock: string | null = null;
+  if (validPins.length > 0) {
+    pinnedBlock = validPins
+      .map((p) =>
+        p.instructions === null || p.loadError
+          ? `---\nPinned skill "${p.slug}" could not be loaded: ${p.loadError ?? "unknown error"}. Tell the operator and proceed without it.`
+          : formatPinnedSkillBlock({
+              slug: p.slug,
+              displayName: p.displayName,
+              instructions: p.instructions,
+              stateScope: p.stateScope,
+              toolsMissing: splitSkillTools(p.toolsRequired, skillToolNamesRef.current).toolsMissing,
+              references: p.references,
+              state: p.state,
+            }),
+      )
+      .join("\n\n");
+  }
 
   // Per-request cache of restored (real) tool-call inputs/outputs, keyed by
   // toolCallId (prefixed with "out:" for outputs). Ensures restoreDeep() is
@@ -621,12 +734,13 @@ export async function prepareAgentRun(
   // One merge point — customTools last so they win on collision. allTools is
   // key-sorted (see above), and wrapping preserves that order.
   const agentTools: ToolSet = wrapToolExecutors(
-    allTools,
+    cappedTools,
     piiVault,
     restoreCache,
     {
       // fs_write/fs_edit carry content — never restore PII tokens into disk writes
-      noArgumentRestore: new Set(["fs_write", "fs_edit"]),
+      // find_skill queries leave for a third-party registry — tokens stay tokens
+      noArgumentRestore: new Set(["fs_write", "fs_edit", "find_skill"]),
       // Results are pure filesystem structure — no scanning, no redaction.
       piiStructuralTools: new Set([
         "fs_list",
@@ -634,6 +748,9 @@ export async function prepareAgentRun(
         "fs_mkdir",
         "fs_move",
         "fs_delete",
+        // Skill instructions must reach the model verbatim — tokenizing the
+        // operator's own authored content makes skills silently execute wrong.
+        "load_skill",
       ]),
       // Scan only these fields; everything else passes through untouched.
       piiScanFieldsByTool: { fs_read: ["content"] },
@@ -890,6 +1007,52 @@ export async function prepareAgentRun(
             );
         }
 
+        // Skill state persistence (Phase 6): in-band ```skill-state <slug>
+        // blocks from stateful skills loaded or pinned this turn. Structured
+        // procedure data — never the pgvector memory system. Never throws.
+        try {
+          const assistantText = assistantParts
+            .filter((p) => p.type === "text")
+            .map((p) => p.text as string)
+            .join("\n");
+          const updates = extractSkillStateUpdates(assistantText);
+          if (updates.length > 0) {
+            const stateful = new Map<string, { skillId: string; stateScope: string }>();
+            for (const p of validPins) {
+              if (p.stateScope === "session" || p.stateScope === "persistent") {
+                stateful.set(p.slug, { skillId: p.skillId, stateScope: p.stateScope });
+              }
+            }
+            if (loadedSkillSlugs.size > 0) {
+              const rows = await db.skill.findMany({
+                where: {
+                  userId: instance.userId,
+                  slug: { in: [...loadedSkillSlugs] },
+                  stateScope: { in: ["session", "persistent"] },
+                },
+                select: { id: true, slug: true, stateScope: true },
+              });
+              for (const r of rows) {
+                stateful.set(r.slug, { skillId: r.id, stateScope: r.stateScope });
+              }
+            }
+            for (const u of updates) {
+              const target = stateful.get(u.slug);
+              // State for a skill not loaded this turn is ignored.
+              if (!target) continue;
+              await saveSkillState({
+                skillId: target.skillId,
+                stateScope: target.stateScope,
+                chatId,
+                instanceId,
+                data: u.data,
+              });
+            }
+          }
+        } catch (err) {
+          console.error("[skills/state] persistence failed:", err);
+        }
+
         // Update the pre-created assistant message with final content + totals
         metrics.genMs = Date.now() - metrics.startedAt;
         const finishReasonStr =
@@ -993,9 +1156,26 @@ export async function prepareAgentRun(
       redactedMessages as any,
     )) as typeof redactedMessages;
   }
+
+  // Pinned skills bypass the tool path (§3.3) so they never saw the vault or
+  // the shield — append here, verbatim, onto the volatile tail (Fix B).
+  if (pinnedBlock) {
+    const last = redactedMessages[redactedMessages.length - 1];
+    if (last?.role === "user" && typeof last.content === "string") {
+      redactedMessages[redactedMessages.length - 1] = {
+        ...last,
+        content: `${last.content}\n\n${pinnedBlock}`,
+      };
+    } else {
+      redactedMessages.push({
+        role: "user" as const,
+        content: sanitizeString(pinnedBlock),
+      });
+    }
+  }
   metrics.sectionTokens = estimateSectionTokens(
     safeSystemPrompt,
-    allTools,
+    cappedTools,
     redactedMessages,
   );
   mark("setup complete (pre-first-token)");

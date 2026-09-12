@@ -15,6 +15,17 @@ interface SystemPromptParams {
   fsReadEnabled?: boolean;
   /** Effective per-message fs mode (already clamped by resolveFsMode) */
   fsMode?: "read-only" | "full";
+  /**
+   * Tier-1 skill index rows (enabled trusted + verified for this user).
+   * Sorted by slug upstream; rendered in the static region (§3.1).
+   * Omitted entirely when empty so no-skill prompts stay byte-identical.
+   */
+  availableSkills?: Array<{
+    slug: string;
+    description: string;
+    /** Verified skills are view-only in the index — pin to use. */
+    pinOnly: boolean;
+  }>;
 }
 
 const DEFAULT_SOUL_PROMPT = `## Who You Are
@@ -341,6 +352,21 @@ If a task will need more than ~8 tool calls, stop after the 8th and report what 
       : COMPOSIO_TOOLS_DESCRIPTION,
   );
   sections.push(CUSTOM_TOOLS_DESCRIPTION);
+  // Tier-1 skill index (§3.1): one line per skill, sorted by slug for
+  // byte-stability, in the static region — before history, never after.
+  // Untrusted skills never appear here; verified ones are marked pin-only.
+  if (params.availableSkills && params.availableSkills.length > 0) {
+    sections.push(
+      [
+        "AVAILABLE SKILLS",
+        "Call load_skill(slug) to load a skill's full instructions before doing work it covers.",
+        "",
+        ...params.availableSkills.map(
+          (s) => `- ${s.slug}${s.pinOnly ? " (pin to use)" : ""}: ${s.description}`,
+        ),
+      ].join("\n"),
+    );
+  }
   sections.push(SCHEDULED_TASK_NOTE);
   sections.push(MESSAGING_GUIDELINES);
   sections.push(REASONING_GLOSS_INSTRUCTION);

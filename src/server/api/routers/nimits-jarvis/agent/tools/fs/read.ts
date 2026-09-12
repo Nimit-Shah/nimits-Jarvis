@@ -12,7 +12,7 @@ export const fsReadSchema = z.object({
 
 export type FsReadInput = z.infer<typeof fsReadSchema>;
 
-type FsToolOptions = { fsReadEnabled: boolean; fsMode: "read-only" | "full"; fsRoot: string | null };
+type FsToolOptions = { fsReadEnabled: boolean; fsMode: "read-only" | "full"; fsRoot: string | null; allowedSkillSlugs?: Set<string> };
 
 const BINARY_SNIFF_BYTES = 8_192;
 
@@ -21,7 +21,13 @@ export function createFsReadTool(fs: FsToolOptions): Tool<FsReadInput, Record<st
     description: "Read a text file on the operator's Mac",
     inputSchema: zodSchema(fsReadSchema),
     execute: async ({ path, maxBytes = 65_536 }) => {
-      const resolved = await resolveSafePath(path, fs.fsRoot);
+      // The one narrow skills-root exception (§5.4): references/ of a skill
+      // already loaded this turn. SKILL.md itself stays denied.
+      const resolved = await resolveSafePath(
+        path,
+        fs.fsRoot,
+        fs.allowedSkillSlugs ? { slugs: fs.allowedSkillSlugs } : undefined,
+      );
       if (!resolved.ok) {
         return { error: { code: resolved.code, message: resolved.message } };
       }

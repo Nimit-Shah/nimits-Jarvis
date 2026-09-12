@@ -7,6 +7,7 @@ import {
   isDeniedByName,
   mapErrno,
   resolveSafePath,
+  type SkillRefAccess,
 } from "~/server/lib/fs-access/paths";
 
 export const fsListSchema = z.object({
@@ -18,7 +19,7 @@ export const fsListSchema = z.object({
 
 export type FsListInput = z.infer<typeof fsListSchema>;
 
-type FsToolOptions = { fsReadEnabled: boolean; fsMode: "read-only" | "full"; fsRoot: string | null };
+type FsToolOptions = { fsReadEnabled: boolean; fsMode: "read-only" | "full"; fsRoot: string | null; allowedSkillSlugs?: Set<string> };
 
 interface FsEntry {
   name: string;
@@ -46,6 +47,7 @@ async function listOne(
     includeHidden: boolean;
     fsRoot: string | null;
     budget: Budget;
+    skillRefs?: SkillRefAccess;
   },
 ): Promise<ListOneResult> {
   const entries: FsEntry[] = [];
@@ -104,12 +106,12 @@ async function listOne(
     // a cheap string-only deny check is equivalent to resolveSafePath there.
     // Only symlinks need real resolution (they can point anywhere).
     if (isLink) {
-      const resolved = await resolveSafePath(full, opts.fsRoot);
+      const resolved = await resolveSafePath(full, opts.fsRoot, opts.skillRefs);
       if (!resolved.ok) {
         if (resolved.code === "DENIED_PATH") skippedDenied++;
         continue;
       }
-    } else if (isDeniedByName(full, opts.fsRoot)) {
+    } else if (isDeniedByName(full, opts.fsRoot, opts.skillRefs)) {
       // Denied entries are skipped silently and only counted — listing their
       // names would leak that credentials exist.
       skippedDenied++;
@@ -142,13 +144,16 @@ export function createFsListTool(fs: FsToolOptions): Tool<FsListInput, Record<st
     description: "List directory contents on the operator's Mac",
     inputSchema: zodSchema(fsListSchema),
     execute: async ({ path, depth = 1, includeHidden = false, limit = 200 }) => {
-      const resolved = await resolveSafePath(path, fs.fsRoot);
+      const skillRefs = fs.allowedSkillSlugs
+        ? { slugs: fs.allowedSkillSlugs }
+        : undefined;
+      const resolved = await resolveSafePath(path, fs.fsRoot, skillRefs);
       if (!resolved.ok) {
         return { error: { code: resolved.code, message: resolved.message } };
       }
 
       const budget: Budget = { remaining: limit, dirsVisited: 0 };
-      const rootListing = await listOne(resolved.path, { includeHidden, fsRoot: fs.fsRoot, budget });
+      const rootListing = await listOne(resolved.path, { includeHidden, fsRoot: fs.fsRoot, budget, skillRefs });
       const result: Record<string, unknown> = {
         path: resolved.path,
         entries: rootListing.entries,
@@ -178,6 +183,7 @@ export function createFsListTool(fs: FsToolOptions): Tool<FsListInput, Record<st
             includeHidden,
             fsRoot: fs.fsRoot,
             budget,
+            skillRefs,
           });
           if (sub.truncated) result.budgetExhausted = true;
           children[sd.name] = {

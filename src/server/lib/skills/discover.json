@@ -1,0 +1,34 @@
+{
+  "$schema": "https://example.com/skills-discover-manifest-v1",
+  "comment": "Curated index of compatible SKILL.md repositories for v1. Static manifest — no registry service, no network dependency at startup. Everything installed from here lands untrusted like any other import; curated describes the list, not the trust level.",
+  "entries": [
+    {
+      "slug": "web-design-guidelines",
+      "displayName": "web-design-guidelines",
+      "description": "Use when the user asks to review UI code, check accessibility, or audit design and UX.",
+      "sourceRepo": "https://github.com/vercel-labs/agent-skills",
+      "subdir": "skills/web-design-guidelines"
+    },
+    {
+      "slug": "react-best-practices",
+      "displayName": "react-best-practices",
+      "description": "Use when writing or reviewing React components or Next.js pages for performance.",
+      "sourceRepo": "https://github.com/vercel-labs/agent-skills",
+      "subdir": "skills/react-best-practices"
+    },
+    {
+      "slug": "writing-guidelines",
+      "displayName": "writing-guidelines",
+      "description": "Use when reviewing docs or prose for voice, structure, and style.",
+      "sourceRepo": "https://github.com/vercel-labs/agent-skills",
+      "subdir": "skills/writing-guidelines"
+    },
+    {
+      "slug": "vercel-optimize",
+      "displayName": "vercel-optimize",
+      "description": "Use when optimizing a deployed Vercel project for cost, performance, or reliability.",
+      "sourceRepo": "https://github.com/vercel-labs/agent-skills",
+      "subdir": "skills/vercel-optimize"
+    }
+  ]
+}

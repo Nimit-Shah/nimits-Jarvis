@@ -1,6 +1,17 @@
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { realpath } from "node:fs/promises";
+import { getSkillsRoot } from "~/server/lib/skills/constants";
+
+/**
+ * Skill-references access for one tool call. Only fs_read and fs_list ever
+ * carry this, and only for skills already loaded in the current turn (tracked
+ * on the run context, populated in Phase 4). Every other tool — and every
+ * unlisted slug — sees the skills root as denied.
+ */
+export interface SkillRefAccess {
+  slugs: Set<string>;
+}
 
 /**
  * Phase A path-safety boundary. Every path originating from the model passes
@@ -83,7 +94,42 @@ async function realpathDeepest(abs: string): Promise<string> {
   }
 }
 
-function isDenied(real: string, root: string): boolean {
+/**
+ * Match a realpathed absolute path against the skills root.
+ * Returns the slug plus whether the path is at/below <root>/<slug>/references/.
+ * SKILL.md itself, sibling assets, and other slugs' trees never match as
+ * references — they stay denied.
+ */
+function matchSkillReferences(
+  real: string,
+  skillsRoot: string,
+): { slug: string; underReferences: boolean } | null {
+  if (real !== skillsRoot && !real.startsWith(skillsRoot + sep)) return null;
+  const rest = real === skillsRoot ? "" : real.slice(skillsRoot.length + 1);
+  const [slug, next] = rest.split(sep);
+  if (!slug || next === undefined) return null;
+  if (next !== "references") return { slug, underReferences: false };
+  return { slug, underReferences: true };
+}
+
+function skillsRootSafe(): string | null {
+  try {
+    return getSkillsRoot();
+  } catch {
+    return null;
+  }
+}
+
+function isDenied(real: string, root: string, skillRefs?: SkillRefAccess): boolean {
+  // Skills root is checked FIRST: on macOS the Library subtree deny below
+  // would otherwise swallow the references/ exception before it is reached.
+  // Without a loaded-slug pass, everything under the root is denied.
+  const skillsRoot = skillsRootSafe();
+  if (skillsRoot && (real === skillsRoot || real.startsWith(skillsRoot + sep))) {
+    const m = matchSkillReferences(real, skillsRoot);
+    if (m?.underReferences && skillRefs?.slugs.has(m.slug)) return false;
+    return true;
+  }
   const rel = real.startsWith(root + sep) ? real.slice(root.length + 1) : "";
   const segments = real.split(sep);
   if (segments.some((s) => DENY_SEGMENTS.has(s))) return true;
@@ -104,8 +150,12 @@ function isDenied(real: string, root: string): boolean {
  * Apply the deny-list to the literal path; identical result to isDenied()
  * because realpath(full) === full for a non-symlink child of a real parent.
  */
-export function isDeniedByName(abs: string, rootOverride?: string | null): boolean {
-  return isDenied(abs, expandTilde(rootOverride?.trim() || homedir()));
+export function isDeniedByName(
+  abs: string,
+  rootOverride?: string | null,
+  skillRefs?: SkillRefAccess,
+): boolean {
+  return isDenied(abs, expandTilde(rootOverride?.trim() || homedir()), skillRefs);
 }
 
 /** Map a filesystem error to a SafePath failure with an operator-actionable message. */
@@ -143,6 +193,7 @@ export function mapErrno(err: unknown, path: string, hadTilde = false): SafePath
 export async function resolveSafePath(
   input: string,
   rootOverride?: string | null,
+  skillRefs?: SkillRefAccess,
 ): Promise<SafePath> {
   if (!input || typeof input !== "string") {
     return { ok: false, code: "BAD_PATH", message: "No path supplied." };
@@ -175,7 +226,7 @@ export async function resolveSafePath(
       message: `Path is outside the permitted root (${root}).`,
     };
   }
-  if (isDenied(real, root)) {
+  if (isDenied(real, root, skillRefs)) {
     return {
       ok: false,
       code: "DENIED_PATH",
