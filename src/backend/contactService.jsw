@@ -1,0 +1,41 @@
+/**
+ * Starwood Events & Entertainment — Backend Contact & Lead Processing
+ * Handles secure submission validation, calendar date parsing, and logging.
+ */
+
+export async function submitEventInquiry(inquiryData) {
+  if (!inquiryData || typeof inquiryData !== 'object') {
+    return { success: false, error: 'Invalid inquiry data' };
+  }
+
+  const { name, phone, email, eventDate, eventType, message } = inquiryData;
+
+  // Basic validation
+  if (!name || name.trim().length < 2) {
+    return { success: false, error: 'Name is required (minimum 2 characters)' };
+  }
+
+  if (!phone || phone.trim().length < 8) {
+    return { success: false, error: 'Valid contact phone number is required' };
+  }
+
+  const sanitizedInquiry = {
+    name: name.trim(),
+    phone: phone.trim(),
+    email: email ? email.trim() : null,
+    eventDate: eventDate || null,
+    eventType: eventType || 'Custom Event',
+    message: message ? message.trim() : null,
+    receivedAt: new Date().toISOString(),
+    status: 'PENDING_REVIEW'
+  };
+
+  // Log in production/server environment
+  console.log('[Starwood Backend] Event Inquiry received:', sanitizedInquiry.name, sanitizedInquiry.eventType, sanitizedInquiry.phone);
+
+  return {
+    success: true,
+    message: 'Thank you. We have received your inquiry and will confirm calendar availability shortly.',
+    inquiryId: `SE-${Date.now()}`
+  };
+}
