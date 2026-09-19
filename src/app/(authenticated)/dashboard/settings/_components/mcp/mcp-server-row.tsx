@@ -10,6 +10,7 @@ import { trpc } from "~/clients/trpc";
 import { McpReachabilityBadge } from "./mcp-reachability-badge";
 import { McpStatusBadge } from "./mcp-status-badge";
 import { McpServerToolsList } from "./mcp-server-tools-list";
+import { McpOriginRules } from "./mcp-origin-rules";
 
 type Server = {
   id: string;
@@ -25,6 +26,12 @@ type Server = {
   reachableHere: boolean;
   toolCount: number;
   enabledToolCount: number;
+  serverType?: string;
+  originMode?: string;
+  policyApplying?: boolean;
+  noSandbox?: boolean;
+  infraSeedEnabled?: boolean;
+  infraSeedExcluded?: string[];
 };
 
 export function McpServerRow({ server, instanceId }: { server: Server; instanceId: string }) {
@@ -99,6 +106,17 @@ export function McpServerRow({ server, instanceId }: { server: Server; instanceI
       </div>
       {expanded && (
         <div className="border-t">
+          {server.serverType === "playwright" && (
+            <McpOriginRules
+              serverId={server.id}
+              instanceId={instanceId}
+              originMode={server.originMode ?? "open"}
+              policyApplying={server.policyApplying ?? false}
+              noSandbox={server.noSandbox ?? false}
+              infraSeedEnabled={server.infraSeedEnabled ?? true}
+              infraSeedExcluded={server.infraSeedExcluded ?? []}
+            />
+          )}
           <McpServerToolsList serverId={server.id} enabled={server.enabled} />
         </div>
       )}

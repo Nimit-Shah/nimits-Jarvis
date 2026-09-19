@@ -189,7 +189,26 @@ model McpServer {
   lastSyncedAt DateTime?
   needsSync    Boolean  @default(false)
 
-  tools     McpTool[]
+  // Origin policy (browser-type servers; enforced by browser-mcp-daemon).
+  serverType           String   @default("generic") // generic | playwright
+  originMode           String   @default("open") // open | allowlist
+  policyVersion        Int      @default(0) // bumped on every policy mutation
+  appliedPolicyVersion Int      @default(0) // set by daemon once live
+  infraSeedEnabled     Boolean  @default(true)
+  infraSeedExcluded    String[] @default([]) // seed entries the operator turned off
+
+  // Browser launch config (serverType playwright; consumed by daemon).
+  browserMode    String  @default("bundled") // bundled | channel | executable | cdp
+  browserChannel String? // "chrome" | "msedge" | "chrome-beta"
+  executablePath String? // e.g. /Applications/Comet.app/Contents/MacOS/Comet
+  userDataDir    String? // dedicated profile dir; never a main-browser profile
+  cdpEndpoint    String? // http://127.0.0.1:9222; explicit opt-in only
+  cdpConfirmed   Boolean @default(false)
+  headless       Boolean @default(false)
+  noSandbox      Boolean @default(false) // Docker/root only; never default on macOS
+
+  tools        McpTool[]
+  originRules  McpOriginRule[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -214,6 +233,26 @@ model McpTool {
   @@unique([mcpServerId, originalName])
   @@index([mcpServerId, enabled])
   @@map("mcp_tool")
+}
+
+model McpOriginRule {
+  id          String @id @default(cuid())
+  mcpServerId String
+  server      McpServer @relation(fields: [mcpServerId], references: [id], onDelete: Cascade)
+
+  pattern String // bare site (tradingview.com) or exact origin; expanded by daemon
+  kind    String @default("allow") // allow | block (block wins)
+  origin  String @default("manual") // manual | discovered
+  enabled Boolean @default(true)
+  notes   String?
+  matchCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([mcpServerId, pattern, kind])
+  @@index([mcpServerId, enabled])
+  @@map("mcp_origin_rule")
 }
 
 model Chat {

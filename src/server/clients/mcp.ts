@@ -30,6 +30,8 @@ type McpServerRow = {
   label: string;
   url: string;
   headersEnc: string | null;
+  browserMode?: string | null;
+  cdpConfirmed?: boolean | null;
 };
 
 type McpToolWithServer = {
@@ -49,6 +51,14 @@ type McpToolWithServer = {
 const IDLE_TTL_MS = 5 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 10_000;
 const CALL_TIMEOUT_MS = 30_000;
+
+// Per-tool call budgets (keyed by upstream tool name). Heavy SPA navigation
+// can exceed the shared default; the global stays untouched for every other
+// MCP server.
+const TOOL_TIMEOUT_OVERRIDES: Readonly<Record<string, number>> = {
+  browser_navigate: 60_000,
+  browser_wait_for: 60_000,
+};
 
 const g = globalThis as unknown as { __jarvisMcpClients?: Map<string, CachedMcpClient> };
 const clients: Map<string, CachedMcpClient> = (g.__jarvisMcpClients ??= new Map());
@@ -81,6 +91,20 @@ export function toNamespacedName(serverSlug: string, toolName: string): string {
 function prefixDescription(label: string, desc?: string): string {
   return `[${label}] ${desc ?? ""}`.trim();
 }
+
+// Description suffixes applied at discovery time (stored in DB, visible in
+// Settings). These are guidance, not routers: they steer tool choice without
+// deciding it. Keep this map tiny and generic across MCP servers.
+const DESCRIPTION_GUIDANCE: Readonly<Record<string, string>> = {
+  // Screenshots carry no element refs (browser_click needs snapshot refs) and
+  // cost ~1.1–1.6k tokens each — snapshot is the primary loop.
+  browser_take_screenshot:
+    "Guidance: use browser_snapshot to find and act on elements; screenshots only when the question is about visual appearance.",
+  // Blocked pages are indistinguishable from broken sites at the network
+  // layer — give the model a diagnostic path instead of retry fuel.
+  browser_navigate:
+    "Guidance: if a navigation fails or a page renders without styles, the site may be blocked by this server's origin policy rather than unavailable. Call browser_network_requests to check for failed entries, and report the blocked origin instead of retrying.",
+};
 
 function sanitizeJsonSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== "object") return schema;
@@ -119,7 +143,14 @@ function normalizeMcpResult(result: unknown): unknown {
   const texts: string[] = [];
   for (const block of r.content) {
     if (block.type === "text" && block.text) texts.push(block.text);
-    else if (block.type === "image") texts.push(`[image: ${block.mimeType ?? "unknown"}]`);
+    else if (block.type === "image")
+      // Explicit blindness: image bytes never reach the model today (Phase 4
+      // routes them into MessageAttachment with origin "mcp"). A bare
+      // "[image: ...]" placeholder degrades silently — the model confabulates
+      // about a page it cannot see. Say so, and point at the snapshot loop.
+      texts.push(
+        `[image: ${block.mimeType ?? "unknown"} — not visible to this model; use browser_snapshot for page structure and element refs]`,
+      );
     else if (block.type === "resource" && block.uri) texts.push(`[resource: ${block.uri}]`);
     else if (block.text) texts.push(block.text);
   }
@@ -202,7 +233,12 @@ export async function discoverMcpTools(server: McpServerRow): Promise<
   return tools.map((t) => ({
     originalName: t.name,
     namespacedName: toNamespacedName(server.name, t.name),
-    description: prefixDescription(server.label, t.description),
+    description: prefixDescription(
+      server.label,
+      t.description && DESCRIPTION_GUIDANCE[t.name]
+        ? `${t.description} ${DESCRIPTION_GUIDANCE[t.name]}`
+        : (t.description ?? DESCRIPTION_GUIDANCE[t.name]),
+    ),
     inputSchema: sanitizeJsonSchema(t.inputSchema),
   }));
 }
@@ -267,7 +303,14 @@ export async function getOrCreateMcpTools(
       include: { server: true },
     })) as unknown as McpToolWithServer[];
 
-    const usable = rows.filter((r) => isReachableHere(classifyReachability(r.server.url)));
+    const usable = rows.filter(
+      (r) =>
+        isReachableHere(classifyReachability(r.server.url)) &&
+        // CDP attaches to a live, possibly authenticated browser: explicit
+        // per-server opt-in, and never on unattended sources. Gate by
+        // availability, not runtime rejection.
+        (r.server.browserMode !== "cdp" || (source === "web" && r.server.cdpConfirmed === true)),
+    );
 
     const set: ToolSet = {};
     for (const row of usable) {
@@ -285,22 +328,42 @@ export async function getOrCreateMcpTools(
 }
 
 async function callMcpTool(row: McpToolWithServer, args: unknown): Promise<unknown> {
+  const timeout = TOOL_TIMEOUT_OVERRIDES[row.originalName] ?? CALL_TIMEOUT_MS;
   try {
     const client = await getOrCreateMcpClient(row.server);
     const result = await withTimeout(
       client.callTool({ name: row.originalName, arguments: args as Record<string, unknown> }),
-      CALL_TIMEOUT_MS,
+      timeout,
     );
     return normalizeMcpResult(result);
   } catch (err) {
-    await markServerFailed(row.mcpServerId, err);
     const msg = describeError(err);
-    // Set needsSync hint on unknown-tool / invalid-arguments
-    if (/unknown tool|invalid arguments|not found/i.test(msg)) {
+    // Self-heal: a server restart wipes Streamable HTTP sessions, so the
+    // cached client's session id goes stale ("Session not found/expired").
+    // Drop the cached client and retry once with a fresh initialize instead
+    // of wedging every tool until process restart.
+    if (/session (not found|expired|unknown)|unknown session|invalid session/i.test(msg)) {
+      invalidateMcpClient(row.server.id);
+      try {
+        const client = await getOrCreateMcpClient(row.server);
+        const result = await withTimeout(
+          client.callTool({ name: row.originalName, arguments: args as Record<string, unknown> }),
+          timeout,
+        );
+        return normalizeMcpResult(result);
+      } catch (retryErr) {
+        err = retryErr;
+      }
+    }
+    await markServerFailed(row.mcpServerId, err);
+    const finalMsg = describeError(err);
+    // Set needsSync hint on unknown-tool / invalid-arguments — but not on
+    // session errors, which are transient reconnects, not schema drift.
+    if (/unknown tool|invalid arguments/i.test(finalMsg)) {
       try {
         await db.mcpServer.update({ where: { id: row.mcpServerId }, data: { needsSync: true } });
       } catch {}
     }
-    return { isError: true as const, message: `MCP ${row.server.label}/${row.originalName}: ${msg}` };
+    return { isError: true as const, message: `MCP ${row.server.label}/${row.originalName}: ${finalMsg}` };
   }
 }

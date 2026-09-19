@@ -8,6 +8,11 @@ import { toggleMcpServer } from "./toggleMcpServer";
 import { syncMcpTools } from "./syncMcpTools";
 import { toggleMcpTool } from "./toggleMcpTool";
 import { testMcpServer } from "./testMcpServer";
+import { listMcpOriginRules } from "./listMcpOriginRules";
+import { addMcpOriginRule } from "./addMcpOriginRule";
+import { toggleMcpOriginRule } from "./toggleMcpOriginRule";
+import { deleteMcpOriginRule } from "./deleteMcpOriginRule";
+import { listSeedCandidates } from "./listSeedCandidates";
 
 export const mcpRouter = router({
   addMcpServer,
@@ -19,4 +24,9 @@ export const mcpRouter = router({
   syncMcpTools,
   toggleMcpTool,
   testMcpServer,
+  listMcpOriginRules,
+  addMcpOriginRule,
+  toggleMcpOriginRule,
+  deleteMcpOriginRule,
+  listSeedCandidates,
 });

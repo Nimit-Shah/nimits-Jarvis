@@ -62,8 +62,11 @@ const DENY_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".keychain", ".keychain
 // Library as a whole tree is deliberate: TCC databases, speech transcripts,
 // accountd records — no user-facing task needs the agent browsing there.
 // (If ever needed, add an explicit allowSystemPaths arg gated on full mode.)
+// .jarvis: daemon working root (browser profiles hold live session cookies,
+// specs mirror launch state) — never model-readable.
 const DENY_SUBPATHS = [
   "Library",
+  ".jarvis",
   ".config/gh",
   ".config/gcloud",
   ".local/share/keyrings",

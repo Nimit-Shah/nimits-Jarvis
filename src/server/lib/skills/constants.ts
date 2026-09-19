@@ -22,7 +22,9 @@ export function getSkillsRoot(): string {
     p = join(homedir(), ".local", "share", "nimits-jarvis", "skills");
   }
   try {
-    return realpathSync(p);
+    // Runtime data dir outside the repo — never a build-time asset, so opt
+    // out of Turbopack's whole-project filesystem tracing for this call.
+    return realpathSync(/*turbopackIgnore: true*/ p);
   } catch {
     return p;
   }

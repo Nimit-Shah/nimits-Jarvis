@@ -138,7 +138,11 @@ export async function findSkillSubdir(
   if (opts?.name) {
     const found: string[] = [];
     for (const container of CONTAINERS) {
-      await collectSkillFiles(join(cloneDir, container), 3, found);
+      await collectSkillFiles(
+        join(/*turbopackIgnore: true*/ cloneDir, container),
+        3,
+        found,
+      );
     }
     // Shallow first: fewer separators = shallower.
     found.sort(

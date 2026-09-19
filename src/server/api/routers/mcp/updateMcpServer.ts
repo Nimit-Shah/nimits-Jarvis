@@ -3,6 +3,7 @@ import { protectedProcedure } from "~/server/api/trpc";
 import { db } from "~/server/clients/db";
 import { encrypt } from "~/lib/crypto";
 import { assertSafeMcpUrl } from "~/lib/mcp-url";
+import { validateDedicatedProfileDir } from "~/server/lib/browser/profile-guard";
 import { invalidateMcpClient } from "~/server/clients/mcp";
 import { updateMcpServerSchema } from "./updateMcpServer.schema";
 
@@ -30,6 +31,32 @@ export const updateMcpServer = protectedProcedure
       if (input.headers === null) data.headersEnc = null;
       else data.headersEnc = await encrypt(JSON.stringify(input.headers));
     }
+    // Policy fields: any change restarts the supervised browser via the daemon.
+    let policyTouched = false;
+    if (input.userDataDir !== undefined && input.userDataDir !== null) {
+      const check = validateDedicatedProfileDir(input.userDataDir);
+      if (!check.ok) throw new TRPCError({ code: "BAD_REQUEST", message: check.message });
+    }
+    for (const key of [
+      "originMode",
+      "serverType",
+      "browserMode",
+      "browserChannel",
+      "executablePath",
+      "userDataDir",
+      "cdpEndpoint",
+      "cdpConfirmed",
+      "headless",
+      "noSandbox",
+      "infraSeedEnabled",
+      "infraSeedExcluded",
+    ] as const) {
+      if (input[key] !== undefined) {
+        data[key] = input[key];
+        policyTouched = true;
+      }
+    }
+    if (policyTouched) data.policyVersion = { increment: 1 };
 
     const updated = await db.mcpServer.update({ where: { id: input.serverId }, data });
     invalidateMcpClient(input.serverId);
