@@ -4,7 +4,6 @@
 /node_modules
 /.pnp
 .pnp.js
-pnpm-lock.yaml
 
 # testing
 /coverage
@@ -100,6 +99,12 @@ docs/
 docs/PHASE_A_FS_ACCESS.md
 docs/PHASE_B_FS_WRITE.md
 
+# Local Jarvis / Mnemosyne runtime state
+.mnemosyne/data/
 
+# Local scratch / experimentation
+/scratch/
 
-
+# Local agent context & backups
+LEAN-CTX.md
+*.bak
