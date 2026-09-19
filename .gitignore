@@ -108,3 +108,4 @@ docs/PHASE_B_FS_WRITE.md
 # Local agent context & backups
 LEAN-CTX.md
 *.bak
+.opencode/
