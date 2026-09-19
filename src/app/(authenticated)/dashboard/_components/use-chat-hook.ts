@@ -99,16 +99,7 @@ export function useChatHook({
                 p.type === "text" &&
                 typeof (p as { text?: string }).text === "string",
             );
-            return {
-              ...msg,
-              parts: textParts.map((p) => ({
-                ...p,
-                text: p.text.replace(
-                  /(?:^|\s)\/?[^\s]*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|tiff)(?:\s|$)/gi,
-                  " ",
-                ),
-              })),
-            };
+            return { ...msg, parts: textParts };
           }),
           instanceId,
           // Unsaved New Chat posts without a chatId — the server creates
@@ -129,6 +120,9 @@ export function useChatHook({
           // Validated server-side; see agent/setup.ts pinnedSkills.
           pinnedSkills:
             (body as { pinnedSkills?: string[] } | undefined)?.pinnedSkills,
+          // Image attachment ids for this turn — validated server-side.
+          attachmentIds:
+            (body as { attachmentIds?: string[] } | undefined)?.attachmentIds,
         },
       }),
       prepareReconnectToStreamRequest: () => ({
@@ -183,13 +177,7 @@ export function useChatHook({
       void utils.nimitsJarvis.getHistory.invalidate();
       void utils.chats.list.invalidate();
       const msg = error.message || "An error occurred";
-      if (msg.includes("image") || msg.includes("Cannot read")) {
-        showErrorToast(
-          "Image input is not supported. Please remove any attached images and try again.",
-        );
-      } else {
-        showErrorToast(msg);
-      }
+      showErrorToast(msg);
     },
   });
 
@@ -250,6 +238,7 @@ export function useChatHook({
       text: string,
       fsAccessMode?: "read-only" | "full",
       pinnedSkills?: string[],
+      attachmentIds?: string[],
     ) => {
       void sendMessageRef.current(
         { text },
@@ -259,6 +248,8 @@ export function useChatHook({
             fsAccessMode,
             pinnedSkills:
               pinnedSkills && pinnedSkills.length > 0 ? pinnedSkills : undefined,
+            attachmentIds:
+              attachmentIds && attachmentIds.length > 0 ? attachmentIds : undefined,
             idempotencyKey: crypto.randomUUID(),
           },
         },

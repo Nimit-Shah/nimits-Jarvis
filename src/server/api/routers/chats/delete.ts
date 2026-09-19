@@ -40,10 +40,18 @@ export const deleteChat = protectedProcedure
     }
 
     await db.$transaction(async (tx) => {
+      await tx.messageAttachment.deleteMany({ where: { chatId: chat.id } });
       await tx.message.deleteMany({ where: { chatId: chat.id } });
       await tx.cronJob.deleteMany({ where: { chatId: chat.id } });
       await tx.chat.delete({ where: { id: chat.id } });
     });
+
+    // Attachment bytes live on disk (rows cascade, files don't) — remove the
+    // chat's directory. Fire-and-forget; the GC sweep covers failures.
+    const { rm } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { getAttachmentsRoot } = await import("~/server/lib/attachments/constants");
+    void rm(join(getAttachmentsRoot(), chat.instanceId, chat.id), { recursive: true, force: true });
 
     return { success: true };
   });

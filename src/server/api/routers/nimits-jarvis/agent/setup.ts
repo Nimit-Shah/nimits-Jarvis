@@ -267,7 +267,22 @@ async function redactContextMessages(
   const result: ReconstructedMessage[] = [];
   for (const msg of messages) {
     if (msg.role === "user") {
-      result.push({ ...msg, content: await vault.redact(msg.content) });
+      // Text-only history (incl. $image references) redacts as a string.
+      // Current-turn multimodal content redacts text parts and passes file
+      // parts through untouched — the vault cannot see inside an image.
+      if (typeof msg.content === "string") {
+        result.push({ ...msg, content: await vault.redact(msg.content) });
+      } else {
+        const redactedParts = [];
+        for (const part of msg.content) {
+          if (part.type === "text") {
+            redactedParts.push({ ...part, text: await vault.redact(part.text) });
+          } else {
+            redactedParts.push(part);
+          }
+        }
+        result.push({ ...msg, content: redactedParts });
+      }
     } else if (msg.role === "assistant") {
       if (typeof msg.content === "string") {
         result.push({ ...msg, content: await vault.redact(msg.content) });
@@ -333,6 +348,12 @@ interface PrepareAgentRunParams {
   isVoice?: boolean;
   fsAccessMode?: FsAccessMode; // defaults to "read-only" via resolveFsMode when absent
   /**
+   * Ordered attachment ids for this turn. Array position + 1 is the Image N
+   * label — the label is display-only, never stored. Absent/empty behaves
+   * exactly as before (byte-identical text-only path).
+   */
+  attachmentIds?: string[];
+  /**
    * Slugs pinned from the composer menu for this message. Validated against
    * the user's own Skill rows (unknown/unowned slugs dropped silently so a
    * stale client cannot probe). Per-message, never sticky. Ignored unless
@@ -385,6 +406,7 @@ export async function prepareAgentRun(
     fsAccessMode,
     pinnedSkills,
     streamId,
+    attachmentIds,
   } = params;
   const t0 = performance.now();
   const mark = (label: string) => {
@@ -571,6 +593,48 @@ export async function prepareAgentRun(
     chatId,
     chat.lastCompactionAt,
   );
+
+  // Current-turn attachments: validate ownership, re-check model capability
+  // server-side (client is never the authority), read sent derivatives.
+  let turnAttachments: Array<{ mediaType: string; data: string; filename?: string }> = [];
+  let validAttachmentIds: string[] = [];
+  if (attachmentIds && attachmentIds.length > 0) {
+    const { resolveVisionCapability } = await import("./model-utils");
+    const capable = await resolveVisionCapability(chat.model);
+    if (capable === false) {
+      // Loud, not silent: a quiet drop here once produced confident
+      // hallucinations about an image the model never received.
+      throw new Error(
+        `MODEL_NO_VISION: ${chat.model} can't read images — switch to a vision-capable model and re-attach.`,
+      );
+    } else {
+      const rows = await db.messageAttachment.findMany({
+        where: { id: { in: attachmentIds.slice(0, 20) }, chatId, instanceId, status: "ready" },
+        select: { id: true, mimeType: true, storagePath: true },
+      });
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const { getAttachmentsRoot } = await import("~/server/lib/attachments/constants");
+      const { readFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      const root = getAttachmentsRoot();
+      for (const id of attachmentIds.slice(0, 20)) {
+        const row = byId.get(id);
+        if (!row) continue; // stale/foreign ids dropped silently (no probing)
+        try {
+          const buf = await readFile(join(root, row.storagePath));
+          validAttachmentIds.push(id);
+          turnAttachments.push({
+            mediaType: "image/webp",
+            data: buf.toString("base64"),
+            filename: `${id}.webp`,
+          });
+        } catch {
+          console.warn("[agent/attachments] unreadable derivative, skipping", { id });
+        }
+      }
+    }
+  }
+
   const aiMessages = buildContext(
     dbMessages,
     chat.lastCompactionSummary,
@@ -587,7 +651,16 @@ export async function prepareAgentRun(
         isVoice: isVoice ?? false,
       }),
     },
+    turnAttachments,
   );
+
+  if (turnAttachments.length > 0) {
+    systemPrompt +=
+      "\n\n---\n\nImage summaries: the current turn includes attached images. " +
+      "End your response with a fenced block describing each image in one or two sentences:\n" +
+      "```jarvis:image-summary\n1: <description of Image 1>\n2: <description of Image 2>\n```\n" +
+      "The block is parsed and hidden from the operator.";
+  }
 
   const contextWindow = getContextWindow(chat.model);
   const { messages: prunedMessages } = pruneContext(aiMessages, contextWindow);
@@ -641,7 +714,7 @@ export async function prepareAgentRun(
   const { getOrCreateMcpTools } = await import("~/server/clients/mcp");
   const rawMcpTools = await getOrCreateMcpTools(instance.id, source);
 
-  await db.message.create({
+  const userRow = await db.message.create({
     data: {
       instanceId,
       chatId,
@@ -650,7 +723,14 @@ export async function prepareAgentRun(
       source,
       ...(userMessageType && { messageType: userMessageType }),
     },
+    select: { id: true },
   });
+  if (validAttachmentIds.length > 0) {
+    await db.messageAttachment.updateMany({
+      where: { id: { in: validAttachmentIds }, chatId, instanceId },
+      data: { messageId: userRow.id },
+    });
+  }
   // Trim verbose tool schemas to reduce token usage by ~40-60%.
   // This prevents free-tier TPM rate-limit errors with smaller models.
   // MCP goes before optimize so its schemas are also trimmed; customTools stay raw.
@@ -1051,6 +1131,53 @@ export async function prepareAgentRun(
           }
         } catch (err) {
           console.error("[skills/state] persistence failed:", err);
+        }
+
+        // Image summaries (§7.2): in-band ```jarvis:image-summary blocks are
+        // parsed from this turn's response, redacted through the vault before
+        // persisting (the vault never sees pixels, but it sees this text),
+        // and stripped from what the operator sees. Never blocks the response.
+        try {
+          if (validAttachmentIds.length > 0) {
+            const fullText = assistantParts
+              .filter((p) => p.type === "text")
+              .map((p) => p.text as string)
+              .join("\n");
+            const m = /```jarvis:image-summary\s*\n([\s\S]*?)```/m.exec(fullText);
+            if (m?.[1]) {
+              const lines = m[1].split("\n");
+              const byIndex = new Map<number, string>();
+              let cur: number | null = null;
+              for (const line of lines) {
+                const head = /^(\d+):\s*(.*)$/.exec(line.trim());
+                if (head) {
+                  cur = Number(head[1]);
+                  byIndex.set(cur, head[2] ?? "");
+                } else if (cur !== null && line.trim()) {
+                  byIndex.set(cur, `${byIndex.get(cur) ?? ""} ${line.trim()}`.trim());
+                }
+              }
+              for (let i = 0; i < validAttachmentIds.length; i++) {
+                const text = byIndex.get(i + 1);
+                if (!text) continue;
+                const safe = piiVault ? await piiVault.redact(text) : text;
+                await db.messageAttachment.update({
+                  where: { id: validAttachmentIds[i] },
+                  data: { summary: safe.slice(0, 2000) },
+                }).catch(() => undefined);
+              }
+            }
+            // Strip the block from persisted/displayed parts.
+            for (const p of assistantParts) {
+              if (p.type === "text" && typeof p.text === "string") {
+                p.text = p.text
+                  .replace(/```jarvis:image-summary\s*\n[\s\S]*?```/m, "")
+                  .trim();
+              }
+            }
+          }
+        } catch (err) {
+          console.error("[attachments/summary] persistence failed:", err);
         }
 
         // Update the pre-created assistant message with final content + totals

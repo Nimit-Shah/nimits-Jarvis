@@ -133,8 +133,13 @@ export async function loadContextMessages(
     orderBy: { createdAt: "desc" },
     take: MESSAGE_SAFETY_CAP,
     select: {
+      id: true,
       role: true,
       content: true,
+      attachments: {
+        select: { id: true, mimeType: true, width: true, height: true, summary: true },
+        orderBy: { createdAt: "asc" },
+      },
     },
   });
   return rows.reverse();
@@ -152,11 +157,19 @@ export interface VolatileTail {
   modeLines?: string;
 }
 
+/** Image derivative payload for the current turn only. Base64, survives sanitize. */
+export interface CurrentTurnAttachment {
+  mediaType: string;
+  data: string;
+  filename?: string;
+}
+
 export function buildContext(
   dbMessages: Awaited<ReturnType<typeof loadContextMessages>>,
   lastCompactionSummary: string | null,
   userMessage: string,
   volatile?: VolatileTail,
+  attachments?: CurrentTurnAttachment[],
 ): ReconstructedMessage[] {
   const aiMessages = deepSanitize(reconstructMessages(dbMessages));
 
@@ -186,6 +199,25 @@ export function buildContext(
   }
   finalUserMessage += userMessage;
 
+  if (attachments && attachments.length > 0) {
+    const n = attachments.length;
+    const preamble = `Attached images in order: ${Array.from({ length: n }, (_, i) => `Image ${i + 1}`).join(", ")}.`;
+    aiMessages.push({
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: sanitizeString(preamble) },
+        ...attachments.map((a) => ({
+          type: "file" as const,
+          mediaType: a.mediaType,
+          data: a.data,
+          ...(a.filename ? { filename: a.filename } : {}),
+        })),
+        { type: "text" as const, text: sanitizeString(finalUserMessage) },
+      ],
+    });
+    return aiMessages;
+  }
+
   aiMessages.push({
     role: "user" as const,
     content: sanitizeString(finalUserMessage),
@@ -208,6 +240,7 @@ export function reconstructMessages(
   messages: Array<{
     role: string;
     content: unknown;
+    attachments?: Array<{ id: string; mimeType: string; width: number; height: number; summary: string | null }>;
   }>,
 ): ReconstructedMessage[] {
   const result: ReconstructedMessage[] = [];
@@ -244,7 +277,15 @@ export function reconstructMessages(
       .join("\n");
 
     if (role === "user") {
-      result.push({ role: "user", content: textContent || "(empty)" });
+      // Historical images are compact text references, never bytes (§7.1).
+      // Deterministic serialization: fixed key order, no timestamps.
+      const refs = (msg.attachments ?? []).map((a, i) => {
+        const dims = `${a.width}x${a.height}`;
+        const summary = a.summary ?? `image, ${dims}`;
+        return `{"$image": {"id": "${a.id}", "index": ${i + 1}, "mimeType": "${a.mimeType}", "dimensions": "${dims}", "summary": ${JSON.stringify(summary)}}}`;
+      });
+      const body = [textContent || "(empty)", ...refs].join("\n");
+      result.push({ role: "user", content: body });
       continue;
     }
 

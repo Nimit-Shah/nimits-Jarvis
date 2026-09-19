@@ -20,6 +20,7 @@ import { useInstanceId } from "~/hooks/use-instance-id";
 interface ComposerAddMenuProps {
   pinned: string[];
   onToggle: (slug: string) => void;
+  onPickFiles?: () => void;
 }
 
 const SUBMENU_CAP = 10;
@@ -30,7 +31,7 @@ const SUBMENU_CAP = 10;
  * Skills opens an inline sub-panel (no DropdownMenu dep — Popover matches the
  * existing left-slot control). Pins are per-message and clear on send.
  */
-export function ComposerAddMenu({ pinned, onToggle }: ComposerAddMenuProps) {
+export function ComposerAddMenu({ pinned, onToggle, onPickFiles }: ComposerAddMenuProps) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"main" | "skills">("main");
   const [instanceId] = useInstanceId();
@@ -70,11 +71,10 @@ export function ComposerAddMenu({ pinned, onToggle }: ComposerAddMenuProps) {
       <PopoverContent className="w-72 p-1.5" align="start">
         {view === "main" ? (
           <>
-            {/* Placeholder — slot reserved so the menu keeps its shape later */}
+            {/* Files slot — images accepted this phase; label stays broad for documents later */}
             <button
-              disabled
-              title="Coming soon"
-              className="flex w-full cursor-not-allowed items-center gap-2.5 rounded-md px-2 py-2 text-left opacity-50"
+              onClick={() => { close(); onPickFiles?.(); }}
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent"
             >
               <Paperclip className="size-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 text-[13px] font-medium">

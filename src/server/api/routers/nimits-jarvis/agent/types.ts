@@ -14,8 +14,12 @@ export type ToolResultOutput =
   | { type: "text"; value: string }
   | { type: "json"; value: JsonValue };
 
+export type UserContentPart =
+  | { type: "text"; text: string }
+  | { type: "file"; mediaType: string; data: string; filename?: string };
+
 export type ReconstructedMessage =
-  | { role: "user"; content: string; providerOptions?: ProviderOptions }
+  | { role: "user"; content: string | UserContentPart[]; providerOptions?: ProviderOptions }
   | {
       role: "assistant";
       content:

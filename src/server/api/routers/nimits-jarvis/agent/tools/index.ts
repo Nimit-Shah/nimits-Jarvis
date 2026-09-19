@@ -10,6 +10,7 @@ import { createFsDeleteTool } from "./fs/delete";
 import { createFsMkdirTool } from "./fs/mkdir";
 import { createFsMoveTool } from "./fs/move";
 import { createReadToolResultTool } from "./read-tool-result";
+import { createViewImageTool } from "./view-image";
 import { createLoadSkillTool, type LoadSkillContext } from "./load-skill";
 import { createFindSkillTool } from "./find-skill";
 import { createInstallSkillTool } from "./install-skill";
@@ -48,6 +49,7 @@ export function createCustomTools(
     memory_search: createMemorySearchTool(instanceId),
     schedule: createScheduleTool(instanceId, chatId ?? "", userTimezone),
     read_tool_result: createReadToolResultTool(instanceId),
+    view_image: createViewImageTool(instanceId, chatId ?? ""),
     // Read-only registry search (CLI-first, API fallback). Always on: it
     // writes nothing and installs nothing — installation is install_skill's
     // reviewed pipeline, never this tool.

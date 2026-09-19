@@ -117,7 +117,18 @@ export function ChatProvider({
   const initialMessages: UIMessage[] = allHistoryMessages.map((msg) => ({
     id: msg.id,
     role: msg.role,
-    parts: msg.content as UIMessage["parts"],
+    parts: [
+      ...(msg.content as UIMessage["parts"]),
+      // Sent images render from the same-origin serving route (img-src 'self'
+      // covers them — no blob: data: URLs needed). Array order is the index.
+      ...((msg as { attachments?: Array<{ id: string }> }).attachments ?? []).map(
+        (a) => ({
+          type: "file" as const,
+          mediaType: "image/webp",
+          url: `/api/attachments/${a.id}?variant=thumb`,
+        }),
+      ),
+    ],
     // Carry the DB timestamp through the UI so hover timestamps work for
     // loaded history. This metadata is client-only and never sent to the LLM.
     metadata: { createdAt: msg.createdAt.toISOString() },

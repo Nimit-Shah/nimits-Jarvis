@@ -160,6 +160,7 @@ model ComposioClawInstance {
 
   chats      Chat[]
   messages   Message[]
+  attachments MessageAttachment[]
   memories   Memory[]
   cronJobs   CronJob[]
   mcpServers McpServer[]
@@ -231,6 +232,7 @@ model Chat {
 
   instance ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   messages Message[]
+  attachments MessageAttachment[]
   cronJobs CronJob[]
   fileChanges FileChange[]
   toolResults ToolResult[]
@@ -268,10 +270,41 @@ model Message {
   createdAt DateTime             @default(now())
   instance  ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   chat      Chat?                @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  attachments MessageAttachment[]
 
   @@index([instanceId, createdAt])
   @@index([chatId, createdAt])
   @@map("composio_claw_message")
+}
+
+model MessageAttachment {
+  id          String   @id @default(cuid())
+  messageId   String?
+  chatId      String
+  instanceId  String
+  kind        String   @default("image")
+  mimeType    String
+  origin      String // paste | picker | fs_read | composio | tool
+  sourcePath  String?
+  sha256      String
+  bytesOrig   Int
+  bytesSent   Int      @default(0)
+  width       Int      @default(0)
+  height      Int      @default(0)
+  storagePath String // server-only, relative to attachments root
+  thumbPath   String  @default("")
+  status      String  @default("pending") // pending|processing|ready|error|removed
+  error       String?
+  summary     String? @db.Text
+  createdAt   DateTime @default(now())
+
+  chat     Chat                @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  message  Message?            @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  instance ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([chatId, createdAt])
+  @@index([messageId])
+  @@map("composio_claw_message_attachment")
 }
 
 model ToolResult {

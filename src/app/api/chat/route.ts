@@ -53,6 +53,9 @@ const chatRequestBody = z.object({
   // Skills pinned from the composer menu for this message. Validated
   // server-side against the user's own rows; stale/foreign slugs dropped.
   pinnedSkills: z.array(z.string().min(1).max(64)).max(10).optional(),
+  // Ordered image attachment ids for this turn. Validated server-side for
+  // ownership; stale/foreign ids dropped silently. Absent = text-only.
+  attachmentIds: z.array(z.string().cuid()).max(20).optional(),
   // Client-generated UUID per send. Retried/double-fired submits sharing one
   // key attach to the first run instead of starting a second one.
   idempotencyKey: z.string().max(128).optional(),
@@ -215,7 +218,7 @@ export async function POST(request: Request) {
       )
       .map((p) => p.text)
       .join("\n") ?? "";
-  if (!userText.trim()) {
+  if (!userText.trim() && !(body.data.attachmentIds && body.data.attachmentIds.length > 0)) {
     return new Response("Empty message", { status: 400 });
   }
 
@@ -354,6 +357,7 @@ export async function POST(request: Request) {
       isVoice: body.data.isVoice ?? false,
       fsAccessMode: body.data.fsAccessMode,
       pinnedSkills: body.data.pinnedSkills,
+      attachmentIds: body.data.attachmentIds,
       streamId,
     });
   } catch (error) {
@@ -362,6 +366,11 @@ export async function POST(request: Request) {
     console.error("[chat] prepareAgentRun failed:", error);
     releaseRun(streamId);
     await releaseChatRun(chatId, streamId);
+    // Capability rejection is operator-actionable (switch models), not a
+    // server fault — surface as 400 with the model's own message.
+    if (error instanceof Error && error.message.startsWith("MODEL_NO_VISION:")) {
+      return new Response(error.message.replace(/^MODEL_NO_VISION:\s*/, ""), { status: 400 });
+    }
     throw error;
   }
 

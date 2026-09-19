@@ -17,6 +17,7 @@ import { saveOnboardingState } from "./saveOnboardingState";
 import { checkConnectionStatus } from "./checkConnectionStatus";
 import { getOpenRouterModels } from "./getOpenRouterModels";
 import { getLocalModels } from "./getLocalModels";
+import { getVisionCapability } from "./getVisionCapability";
 import { executeFileChange } from "./executeFileChange";
 import { undoFileChange } from "./undoFileChange";
 import { getFileChange } from "./getFileChange";
@@ -48,6 +49,7 @@ export const nimitsJarvisRouter = router({
   checkConnectionStatus,
   getOpenRouterModels,
   getLocalModels,
+  getVisionCapability,
   executeFileChange,
   undoFileChange,
   getFileChange,

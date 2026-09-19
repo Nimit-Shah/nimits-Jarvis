@@ -20,6 +20,7 @@ export interface SectionTokens {
   history: number;
   current: number;
   toolResults: number;
+  attachments: number;
 }
 
 function estChars(value: unknown): number {
@@ -50,11 +51,23 @@ export function estimateSectionTokens(
     }
   }
   const currentChars = estChars(messages.at(-1)?.content);
+  // Attachment bytes ride the volatile tail — attribute them separately so
+  // image cost never hides inside `current`.
+  let attachmentChars = 0;
+  const last = messages.at(-1);
+  if (last?.role === "user" && Array.isArray(last.content)) {
+    for (const part of last.content) {
+      if (typeof part === "object" && part !== null && (part as { type?: string }).type === "file") {
+        attachmentChars += estChars((part as { data?: unknown }).data);
+      }
+    }
+  }
   return {
     system: tokens(estChars(system)),
     tools: tokens(estChars(tools)),
     history: tokens(totalChars - currentChars),
-    current: tokens(currentChars),
+    current: tokens(currentChars - attachmentChars),
     toolResults: tokens(toolResultChars),
+    attachments: tokens(attachmentChars),
   };
 }

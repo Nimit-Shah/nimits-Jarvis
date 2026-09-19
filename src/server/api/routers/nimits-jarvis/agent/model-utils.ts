@@ -53,6 +53,112 @@ export function isAnthropicModel(modelId: string): boolean {
 }
 
 /**
+ * Maintained list of Ollama vision-capable model families. Ollama's
+ * /api/tags response carries only names (no modality signal), so this stays
+ * a curated list in one place — update here when new families land.
+ */
+const OLLAMA_VISION_FAMILIES = [
+  "llava",
+  "qwen2-vl",
+  "qwen2.5-vl",
+  "minicpm-v",
+  "bakllava",
+  "moondream",
+  "gemma3",
+];
+
+/** Substrings marking OpenRouter/Anthropic models with native vision input. */
+const VISION_MODEL_HINTS = [
+  "claude",
+  "gpt-4o",
+  "gpt-4.1",
+  "gpt-5",
+  "gemini",
+  "qwen-vl",
+  "qwen2-vl",
+  "qwen2.5-vl",
+  "llava",
+  "vision",
+  "pixtral",
+  "mistral-medium",
+  "grok-vision",
+  "sonar-pro",
+];
+
+/**
+ * Vision capability for image attachments. Sync fast path over model-family
+ * hints; `"unknown"` when the catalog has no entry — unknown means
+ * allow-with-warning, never block. Composer gates on `false`; server
+ * re-checks via `resolveVisionCapability` and rejects loudly on `false`.
+ *
+ * Deliberately no vendor deny-rules here: on 2026-09-18 the static
+ * `deepseek → false` rule silently discarded uploads for
+ * `deepseek-v4.1-flash`, which the OpenRouter catalog lists with
+ * `input_modalities: ["text","image"]`. Guessing `false` blocks legitimately
+ * capable models — only affirmatively text-only families return `false`.
+ */
+export function supportsVision(modelId: string): boolean | "unknown" {
+  const id = modelId.toLowerCase().replace(/^openrouter\//, "");
+  const provider = getModelProvider(modelId);
+  if (provider === "anthropic") return true;
+  if (provider === "ollama") {
+    const base = id.split(":")[0] ?? id;
+    if (OLLAMA_VISION_FAMILIES.some((f) => base.includes(f))) return true;
+    // qwen3:8b-class text models are the default — known incapable.
+    if (base.startsWith("qwen3") || base.startsWith("llama3") || base === "qwen3:8b") return false;
+    return "unknown";
+  }
+  if (VISION_MODEL_HINTS.some((h) => id.includes(h))) return true;
+  return "unknown";
+}
+
+interface OpenRouterCatalogEntry {
+  id: string;
+  canonical_slug?: string;
+  architecture?: { input_modalities?: string[] };
+}
+
+const visionCatalogCache = new Map<string, { at: number; value: boolean | "unknown" }>();
+const VISION_CATALOG_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Data-driven vision capability: OpenRouter `architecture.input_modalities`
+ * (verified 2026-09-18 across 446 models), 1h in-memory TTL. Falls back to
+ * the sync hint path when the key is absent, the fetch fails, or the model
+ * is not OpenRouter-routed. Never throws — worst case returns the hint value.
+ */
+export async function resolveVisionCapability(modelId: string): Promise<boolean | "unknown"> {
+  const hint = supportsVision(modelId);
+  if (hint !== "unknown" || getModelProvider(modelId) !== "openrouter") return hint;
+  const key = modelId.toLowerCase();
+  const cached = visionCatalogCache.get(key);
+  if (cached && Date.now() - cached.at < VISION_CATALOG_TTL_MS) return cached.value;
+  try {
+    const apiKey = env.OPENROUTER_API_KEY;
+    if (!apiKey) return hint;
+    const res = await fetch("https://openrouter.ai/api/v1/models", {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return hint;
+    const data = (await res.json()) as { data: OpenRouterCatalogEntry[] };
+    const bare = key.replace(/^openrouter\//, "");
+    const entry = data.data.find(
+      (m) => m.id.toLowerCase() === bare || m.canonical_slug?.toLowerCase() === bare,
+    );
+    const value: boolean | "unknown" = entry?.architecture?.input_modalities?.includes("image")
+      ? true
+      : "unknown";
+    // A catalog hit without image modality is still just absence of evidence —
+    // keep "unknown" (allow-with-warning) rather than blocking.
+    visionCatalogCache.set(key, { at: Date.now(), value });
+    return value;
+  } catch {
+    return hint;
+  }
+}
+
+/**
  * Resolves a model ID string into the format expected by the AI SDK.
  *
  * - Ollama models → handled separately via `ollamaProvider()`

@@ -5,7 +5,6 @@ import { Virtuoso } from "react-virtuoso";
 import type { VirtuosoHandle } from "react-virtuoso";
 import { Loader2 } from "lucide-react";
 import { ErrorBoundary } from "~/components/core/error-boundary";
-import { showErrorToast } from "~/components/core/toast-notifications";
 import { useChatContext } from "../chat-context";
 import { UserMessage } from "./user-message";
 import { AssistantMessage } from "./assistant-message/assistant-message";
@@ -14,7 +13,9 @@ import { ChatInput } from "./chat-input";
 import { InlineVoiceBar } from "./inline-voice-bar";
 import { useVoiceSession } from "./use-voice-session";
 import { useInstanceId } from "~/hooks/use-instance-id";
+import { useChatId } from "~/hooks/use-chat-id";
 import { trpc } from "~/clients/trpc";
+import { useAttachments } from "./use-attachments";
 
 const SAMPLE_PROMPTS = [
   "Summarize my emails for today",
@@ -44,6 +45,7 @@ export function ChatView() {
     isFetchingOlderMessages,
     fetchOlderMessages,
     chatId,
+    setMessages,
   } = useChatContext();
   const isEmpty = messages.length === 0;
   const [firstItemIndex, setFirstItemIndex] = useState(START_INDEX);
@@ -62,9 +64,49 @@ export function ChatView() {
     prevFirstIdRef.current = currentFirstId;
   }, [messages]);
 
+  // ── Skill pins (Part IV) — per-message, never sticky ──
+  const [pinnedSkills, setPinnedSkills] = useState<string[]>([]);
+  useEffect(() => { setPinnedSkills([]); }, [chatId]);
+  const [, setUrlChatId] = useChatId();
+  const attachments = useAttachments();
+  useEffect(() => { attachments.clear(); }, [chatId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const handleChatCreated = useCallback((id: string) => {
+    setUrlChatId(id);
+  }, [setUrlChatId]);
+  const togglePin = useCallback((slug: string) => {
+    setPinnedSkills((prev) =>
+      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
+    );
+  }, []);
+  const clearPins = useCallback(() => setPinnedSkills([]), []);
+
   const handleSend = useCallback(
-    (text: string, fsAccessMode?: "read-only" | "full", pins?: string[]) => {
-      const result = sendMessage(text, fsAccessMode, pins);
+    (text: string, fsAccessMode?: "read-only" | "full", pins?: string[], attachmentIds?: string[]) => {
+      // Snapshot ready tray thumbs before ChatInput clears the tray — merged
+      // into the optimistic user message so sent images are visible while the
+      // response streams (history mapping covers reloads). Idempotent by URL.
+      const thumbs = attachments.items
+        .filter((it) => it.status === "ready" && (it.thumbUrl ?? it.previewUrl))
+        .map((it) => it.thumbUrl ?? it.previewUrl);
+      const result = sendMessage(text, fsAccessMode, pins, attachmentIds);
+      if (thumbs.length > 0) {
+        const fileParts = thumbs.map((url) => ({ type: "file" as const, mediaType: "image/webp", url }));
+        const merge = () =>
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (!last || last.role !== "user") return prev;
+            const have = new Set(
+              last.parts
+                .filter((p) => p.type === "file")
+                .map((p) => (p as { url?: string }).url),
+            );
+            const fresh = fileParts.filter((fp) => !have.has(fp.url));
+            if (fresh.length === 0) return prev;
+            return [...prev.slice(0, -1), { ...last, parts: [...last.parts, ...fresh] }];
+          });
+        requestAnimationFrame(merge);
+        setTimeout(merge, 600);
+      }
       // Pins are per-message: clear on send (and on chat switch below).
       setPinnedSkills([]);
       requestAnimationFrame(() => {
@@ -72,7 +114,7 @@ export function ChatView() {
       });
       return result;
     },
-    [sendMessage],
+    [sendMessage, setMessages, setPinnedSkills, attachments],
   );
 
   const handleVoiceSend = useCallback(
@@ -109,16 +151,6 @@ export function ChatView() {
   // Layer 2 rule: reset to read-only on every new chat.
   useEffect(() => { setFsMode("read-only"); }, [chatId]);
 
-  // ── Skill pins (Part IV) — per-message, never sticky ──
-  const [pinnedSkills, setPinnedSkills] = useState<string[]>([]);
-  useEffect(() => { setPinnedSkills([]); }, [chatId]);
-  const togglePin = useCallback((slug: string) => {
-    setPinnedSkills((prev) =>
-      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
-    );
-  }, []);
-  const clearPins = useCallback(() => setPinnedSkills([]), []);
-
   // --- Claude-exact inline voice session (scratch) — replaces old overlay hook ---
   const voice = useVoiceSession({
     instanceId: instanceIdForVoice,
@@ -132,11 +164,13 @@ export function ChatView() {
     latestAssistantMessageId,
   });
 
+  // Composer owns paste/drop now (tray + upload). Document-level drops
+  // outside the composer are still prevented so the browser doesn't
+  // navigate away — but no longer toast as unsupported.
   useEffect(() => {
     const handler = (e: DragEvent) => {
       if (e.dataTransfer?.types?.includes("Files")) {
         e.preventDefault();
-        showErrorToast("This model does not support image or file input");
       }
     };
     document.addEventListener("dragover", handler, { capture: true });
@@ -156,15 +190,7 @@ export function ChatView() {
   }, [voice, stop]);
 
   return (
-    <div
-      className="relative flex h-full overflow-hidden"
-      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "none"; }}
-      onDrop={(e) => { e.preventDefault(); e.stopPropagation(); showErrorToast("This model does not support image input"); }}
-      onPaste={(e) => {
-        const items = e.clipboardData?.items;
-        if (items) for (let i = 0; i < items.length; i++) if (items[i]!.kind === "file") { e.preventDefault(); showErrorToast("This model does not support image input"); return; }
-      }}
-    >
+    <div className="relative flex h-full overflow-hidden">
       <div className="flex min-w-0 flex-1 flex-col">
         {isEmpty ? (
           <div className="flex h-full flex-col items-center justify-center gap-8">
@@ -182,7 +208,7 @@ export function ChatView() {
               {showInlineVoice ? (
                 <InlineVoiceBar state={voice.state} volume={voice.volume} liveTranscript={voice.liveTranscript} error={voice.voiceError} onStop={handleVoiceStop} />
               ) : (
-                <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} skillsPin={{ pinned: pinnedSkills, onToggle: togglePin, onClear: clearPins }} />
+                <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} attachments={attachments} onChatCreated={handleChatCreated} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} skillsPin={{ pinned: pinnedSkills, onToggle: togglePin, onClear: clearPins }} />
               )}
             </div>
           </div>
@@ -232,7 +258,7 @@ export function ChatView() {
             {showInlineVoice ? (
               <InlineVoiceBar state={voice.state} volume={voice.volume} liveTranscript={voice.liveTranscript} error={voice.voiceError} onStop={handleVoiceStop} />
             ) : (
-              <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} skillsPin={{ pinned: pinnedSkills, onToggle: togglePin, onClear: clearPins }} />
+              <ChatInput onSend={handleSend} onStop={stop} status={status} chatId={chatId ?? ""} attachments={attachments} onChatCreated={handleChatCreated} voice={{ whisperAvailable: voice.whisperAvailable, onOpenVoiceMode: voice.openVoice }} fsAccess={{ mode: fsMode, onModeChange: setFsMode, fsWriteAllowed: voiceInstance?.fsWriteAllowed ?? false, instanceResolved: instanceFetched }} skillsPin={{ pinned: pinnedSkills, onToggle: togglePin, onClear: clearPins }} />
             )}
           </>
         )}

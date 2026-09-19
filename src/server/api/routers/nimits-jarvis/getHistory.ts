@@ -41,6 +41,10 @@ export const getHistory = protectedProcedure
           inputTokens: true,
           outputTokens: true,
           createdAt: true,
+          attachments: {
+            select: { id: true, mimeType: true, width: true, height: true },
+            orderBy: { createdAt: "asc" },
+          },
         },
       });
 
@@ -82,18 +86,22 @@ export const getHistory = protectedProcedure
       },
       orderBy: { createdAt: "desc" },
       take: input.limit + 1,
-      select: {
-        id: true,
-        role: true,
-        content: true,
-        source: true,
-        inputTokens: true,
-        outputTokens: true,
-        createdAt: true,
-      },
-    });
+        select: {
+          id: true,
+          role: true,
+          content: true,
+          source: true,
+          inputTokens: true,
+          outputTokens: true,
+          createdAt: true,
+          attachments: {
+            select: { id: true, mimeType: true, width: true, height: true },
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
 
-    let nextCursor: string | undefined;
+      let nextCursor: string | undefined;
     if (messages.length > input.limit) {
       const lastItem = messages.pop()!;
       nextCursor = lastItem.createdAt.toISOString();
