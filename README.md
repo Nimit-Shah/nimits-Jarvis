@@ -1,71 +1,87 @@
 # 🤖 Nimits-Jarvis
 
-**Your 100% Local, 24/7 Personal AI Agent — Operating Securely at Zero Cost.**
+### A privacy-first, multimodal, model-agnostic personal AI agent.
 
-`Nimits-Jarvis` is a secure, self-hosted personal AI assistant built on **Next.js 16** (Turbopack), **Composio**, **Model Context Protocol (MCP)**, and **Vercel AI SDK**. Run open-source models locally via **Ollama** or cloud models via **OpenRouter** — with full multi-project isolation, multi-chat threading, per-project encrypted connections, and enterprise-grade 6-layer PII redaction.
+Nimits-Jarvis is a self-hosted AI agent platform that combines **LLM reasoning, persistent memory, tools, local files, external integrations, automation, voice, and multimodal input** into a single agent runtime.
 
----
+Jarvis runs models locally through **Ollama** or uses configured cloud providers through **OpenRouter and other integrations**. Routing, memory, tools, files, and privacy controls stay under one orchestration layer, independent of the underlying model provider.
 
-## 📚 Specification & Architecture Reference
+### What makes Jarvis different?
 
-The system architecture, execution loops, security boundaries, and extension roadmaps in this codebase are designed and governed according to the technical specification created by **Claude Opus 5**:
-- 📄 **Core Architecture & Design Notes:** [`docs/Personal Project Talk with Claude.docx`](file:///Users/ayunimusmac/nimits-jarvis/docs/Personal%20Project%20Talk%20with%20Claude.docx)
-- 🔌 **Model Context Protocol (MCP) Integration:** [`docs/MCP_IMPLEMENTATION.md`](file:///Users/ayunimusmac/nimits-jarvis/docs/MCP_IMPLEMENTATION.md)
-- 📜 **Hermetic Script Execution Engine:** [`docs/SCRIPT_EXECUTION.md`](file:///Users/ayunimusmac/nimits-jarvis/docs/SCRIPT_EXECUTION.md)
-- 🛡️ **PII PureShield Specification:** [`docs/PII-POLICY.internal.md`](file:///Users/ayunimusmac/nimits-jarvis/docs/PII-POLICY.internal.md)
+* 🧠 **Model-agnostic reasoning** — switch models without changing the agent architecture.
+* 🖼️ **Native multimodal input** — paste or attach images directly to conversations.
+* 🔀 **Capability-aware execution** — the runtime checks what the active model supports and fails loudly instead of guessing.
+* 🛠️ **Unified tool ecosystem** — MCP, Composio, local tools, filesystem access, memory, scheduling, and sandboxed execution.
+* 🧠 **Persistent memory** — project-scoped semantic memory with pgvector and Mnemosyne.
+* ⚡ **Token-efficient execution** — optimized tool schemas, context compaction, caching, and selective context injection.
+* 🔐 **Privacy-first architecture** — multi-layer PII protection before sensitive data reaches cloud models.
+* 📁 **Local computer access** — controlled filesystem read/write with boundaries and auditability.
+* 🌐 **Supervised browser control** — headed, policy-gated Playwright automation with an isolated profile.
+* 🎙️ **Voice & omnichannel** — voice interaction and Telegram support.
+* ⏰ **Background automation** — scheduled tasks, retries, distributed locking, and autonomous workflows.
 
----
-
-## ✨ Features & Capabilities
-
-### 🧠 Core Intelligence & Tool Ecosystem
-- **Multi-Provider LLMs:** Run local models on-device via **Ollama** (e.g. `qwen3:8b`, `deepseek-r1`) or cloud models via **OpenRouter** / Anthropic. Each chat thread retains its own model selection.
-- **Unified 4-Source Tool Merge:** Tools from all sources merge into a single AI SDK `ToolSet` without plugin dispatch overhead:
-  1. **Composio Tools (Dynamic):** OAuth-brokered tools (Gmail, Calendar, Slack, GitHub) executing in isolated remote sandboxes.
-  2. **Model Context Protocol (MCP) Tools:** Dynamic per-instance MCP servers (HTTP / SSE / StdIO) with namespaced tools (`mcp__<server>__<tool>`).
-  3. **Custom Local Tools:** Semantic memory (`memory_save`, `memory_search`), cron scheduling (`createScheduleTool`), local filesystem tools (`fs_list`, `fs_find`, `fs_read`, `fs_edit`, `fs_write`, `fs_delete`, `fs_mkdir`, `fs_move`), and connection management.
-  4. **Script Execution (Gated):** Sandboxed Python data analysis via Composio's remote workbench (`code_to_execute`), gated by prompt-level policy — high-stakes external actions (sending mail/messages, deleting data, posting publicly) require explicit chat approval first.
-- **Tool Schema Optimizer:** Automatically trims bloated JSON Schema metadata (`description` noise, redundant definitions) to reduce prompt token consumption by 40–60%.
-- **Per-Step Reasoning Budgets:** On OpenRouter models the first step plans at `medium` reasoning effort and subsequent steps drop to `low`, under a 2,000-token output ceiling — plus prompt guardrails against filename speculation and silent grinding (the agent checks in after ~8 tool calls instead of grinding).
-
-### 💾 Persistent Memory & Context Management
-- **3-Layer Context Compaction:** Auto-pruning → memory flush → summary compaction ensures conversations can run indefinitely without context window overflow.
-- **Semantic pgvector Memory:** Persistent fact storage with `384`-dimension vectors embedded via Ollama (`qllama/bge-small-en-v1.5`), shared across all chats within a project.
-- **Mnemosyne Hybrid Memory Bridge:** Integrates with the Mnemosyne sidecar for fast FTS5 + cosine similarity hybrid recall, gracefully falling back to raw PostgreSQL `pgvector`.
-
-### 🛡️ Enterprise PII PureShield (6-Layer Hybrid Redaction)
-When cloud models are used, sensitive identity data is tokenized and shielded before crossing the network boundary:
-1. **Layer 1: Identity Registry (`identity.yaml`)** — Deterministic <1ms dictionary lookup matching known personal names, phones, emails, and secrets (sorted length-descending to prevent substring collisions).
-2. **Layer 2: Regex & Heuristic Scanner** — RFC 5322 emails, international phone numbers (with lookbehind `(?<!\w)` and 10-digit validation), Luhn-verified credit cards, SSNs, IPv4 addresses, and API key patterns.
-3. **Layer 3: Local DeBERTa ONNX NER Classifier** — Zero-shot token classification using `@huggingface/transformers` with circuit-breaker protection (3 failures → 120s cooldown).
-4. **Layer 4: Structural JSON Extractor** — Schema-aware path walker (depth 25) extracting entities from Gmail People API, Google Calendar, Slack, and Discord payloads.
-5. **Layer 5: Network Transport Shield** — Final egress checkpoint deep-scrubbing the fully assembled message array before HTTP wire serialization.
-6. **Layer 6: SSE Chunk-Boundary Buffered Stream Restore** — Buffers split tokens across streaming chunks, seamlessly restoring `[CLAW_TYPE_HASH]` and `CLAW_EMAIL_hash@trustclaw.anon` tokens back to real values in the browser UI.
-- **Branded Compile-Time Types:** `TokenizedText` and `RealText` enforce PII boundaries at compile-time via TypeScript branded types.
-- **Filesystem-Aware Exemptions:** Structural tool results (directory listings, search hits) skip tokenization so file/folder *names* reach the model intact; `fs_read` *content* is still fully scanned — a source file or CSV with real emails is exactly what layer 2 exists for. Covered by the 100-workflow battery and injection suite (`src/server/api/routers/nimits-jarvis/agent/pii/__tests__/`).
-
-### ⏰ Resilient Background Tasks & Schedulers
-- **Minute-by-Minute Cron Runner:** Triggered via Vercel Cron (`* * * * *`) or local background daemon (`scripts/cron-daemon.ts`).
-- **Distributed Locking:** Database-backed locks with `lockedAt`, `lockedBy`, and stale lock timeout recovery.
-- **Rate-Limit Retry Backoff:** Rate-limited cron tasks are rescheduled with a dynamic retry window (`NOW + retryAfterSeconds`) instead of being skipped.
-
-### 💬 Omnichannel & Voice
-- **Web Dashboard:** Clean Next.js 16 App Router interface with shadcn/ui and Dark Mode.
-- **Readable tool-call transcript:** Consecutive tool calls collapse into one grouped row; each call shows its primary argument (path, search name) instead of raw JSON, with full input/output in a scrollable, copy-enabled panel. Reasoning collapses to one-line summaries; markdown re-renders are throttled during streaming so long replies stay smooth.
-- **Integrations dashboard:** One-click Composio OAuth connect/disconnect per project (Gmail, Calendar, Slack, GitHub, …) backed by per-project encrypted API keys. Toolkits that need no authentication (e.g. Gemini) are labeled "No auth needed" instead of failing to connect.
-- **Settings:** Per-project model default, Files ceilings plus root-folder override, soul/identity/user prompt customization, voice and theme preferences.
-- **Telegram Bot:** Full bidirectional messaging with typing indicators, tool execution status updates, and automatic error handling.
-- **Whisper Voice Mode:** Speech-to-text with interactive audio orb visualization and configurable STT/TTS providers.
-
-### 📁 Local File Access (Phase A read / Phase B write)
-- **Read tools (`fs_list`, `fs_find`, `fs_read`):** gated by a per-project ceiling (Settings → Files) plus a per-message mode in the composer dropdown. `fs_list` enforces one shared entry budget across depth levels and reports real directory sizes, hidden/denied skip counts, and actionable errors (`TCC_BLOCKED`, `NO_PERMISSION`, `DENIED_PATH`) instead of silent empties. `fs_find` is a breadth-first name search (substring or `*` glob, 5-second timeout, 2,000-directory cap) — the agent is instructed to use it before listing when it doesn't know where something is. System/build-noise trees (`node_modules`, `.git`, `~/Library`, `.Trash`, …) are denied at any depth so home-directory walks stay tractable. All paths pass a realpath→containment→deny-list boundary (`src/server/lib/fs-access/paths.ts`).
-- **Write tools (`fs_edit`, `fs_write`, `fs_delete`, `fs_mkdir`, `fs_move`):** B1 auto-write — in Full System Access mode changes execute immediately (no approval cards) under a per-message change budget. Every applied change is journaled to the FileChange audit log (`status="applied"`) with a unified diff plus SHA-256 before/after digests, written atomically, and reversible through the undo journal (7-day retention; `undoFileChange`).
-- **PII policy for files:** file and folder *names* are sent to the model as-is; file *contents* are still PII-scanned for cloud models (disclosed in Settings → Files).
-- **macOS privacy note:** TCC privacy grants attach to the **terminal application that launches the server**, not to Jarvis itself. Grant **Full Disk Access** to that terminal in System Settings → Privacy & Security, and always launch from the same terminal — switching from iTerm to Terminal.app (or an IDE shell) means a fresh grant and silent `EPERM` until it is given.
+Jarvis is designed as an **AI operating layer**, not a chatbot: the model is interchangeable, capabilities are composable, and the agent runtime controls how intelligence, memory, tools, and external systems work together.
 
 ---
 
-## 🏗 System Architecture
+## ✨ Core Capabilities
+
+### 🧠 Model-Agnostic Intelligence
+Multi-provider LLM support (Ollama local, OpenRouter/Anthropic cloud), model-per-chat selection, per-step reasoning budgets (first step plans, later steps act — effort guidance only, no output caps), and agent execution guardrails including a check-in after ~8 tool calls instead of silent grinding.
+
+### 🖼️ Multimodal / Image Understanding
+Clipboard paste or file attachment (50 MB cap, magic-byte validated, archival original + derivatives). Images travel with the turn's text; the server re-validates ownership and model capability — the client is never the authority.
+
+### 🔀 Intelligent Vision Routing
+Capability metadata per model, re-checked server-side. Vision-capable model → images passed directly. Otherwise the run fails loudly (`MODEL_NO_VISION`) telling the user to switch models and re-attach — a quiet drop once produced confident hallucinations about an image the model never received. A configured vision-fallback model is on the roadmap, not yet implemented.
+
+### 🛠️ Tool & Agent Orchestration
+Three sources merge into one AI SDK `ToolSet` (custom tools win collisions, keys sorted for cache stability, 100-step cap): **Composio** OAuth tools in remote sandboxes, **MCP** servers (Streamable HTTP / SSE, per-instance, namespaced `mcp__<server>__<tool>`), and **custom local tools** (memory, scheduling, filesystem, skill loading). High-stakes external actions require explicit chat approval.
+
+### 🌐 Supervised Browser Control
+Opt-in Playwright automation via a supervised daemon (`pnpm browser:daemon`): headed real-Chrome, isolated profile outside the filesystem access tree, per-server origin allowlists (bare sites expand to apex + all subdomains — verified by probe, not assumed), read-only tools first, `cronSafe` permanently off, session self-heal across server restarts.
+
+### 🧠 Persistent Memory
+pgvector semantic memory (384-dim Ollama `bge-small` embeddings, project-scoped), Mnemosyne hybrid FTS5+cosine sidecar with PostgreSQL fallback, and a 3-layer lifecycle: prune before every call, memory flush before compaction, summarization after — conversations run indefinitely without carrying full history.
+
+### ⚡ Context & Token Efficiency
+Tool schemas minimized before reaching the model; redundant descriptions stripped; spent search results collapse to stubs; tool-result payloads decay by age (full → excerpt → one-liner) while staying addressable via paged reads; deterministic serialization keeps provider caching effective. Long multi-step workflows stay resident without re-sending settled context.
+
+### 📁 Local File Intelligence
+Read tools (`fs_list`, `fs_find`, `fs_read`) under per-project ceilings plus per-message modes; write tools under a change budget with a journaled, reversible audit log (unified diffs, SHA-256 digests, 7-day undo). Every path passes realpath→containment→deny-list; system trees and credential stores are refused with actionable errors, and macOS TCC grants attach to the launching terminal.
+
+### 🔐 Privacy / PII Protection
+Six-layer protection for cloud-model execution: identity registry, regex/heuristic scanner (incl. Luhn), local ONNX NER behind a circuit breaker, structural JSON extractor, network egress shield, and SSE stream restore — with compile-time tokenized/real-text boundaries and PII-aware tool-result handling.
+
+### ⏰ Background Tasks
+Minute-cadence cron runner (Vercel Cron or local daemon), atomic per-instance claiming, stale-lock recovery, rate-limit backoff, Telegram/web/cron source gating (`cron` sees only `cronSafe` tools).
+
+### 🎙️ Voice & Omnichannel
+Web dashboard (Next.js 16, shadcn/ui, dark mode), bidirectional Telegram bot, Whisper STT / configurable TTS with audio-orb UI.
+
+---
+
+## 🏗️ Architecture
+
+### Multimodal flow
+
+```text
+User: text + images (paste / attach)
+  → ownership + readiness validation
+  → capability check on the chat model
+  → vision-capable? attach derivatives : MODEL_NO_VISION (loud)
+  → ToolLoopAgent (tools, memory, compaction as usual)
+```
+
+### Capability routing (general shape)
+
+```text
+Input → Capability Detection → Supported → Primary Model
+                              → Unsupported → loud error today;
+                                configured-fallback model (roadmap)
+```
+
+### System diagram
 
 ```mermaid
 flowchart TD
@@ -87,6 +103,7 @@ flowchart TD
         T2["MCP Servers (HTTP/SSE)"]
         T3["Custom Tools (Memory, Schedule, fs_*)"]
         T4["Hermetic Script Runner (Python)"]
+        T5["Supervised Browser (Playwright daemon)"]
     end
 
     subgraph PII PureShield Subsystem
@@ -111,7 +128,7 @@ flowchart TD
 
     D --> P1 & P2 & P3 & P4
     D --> F
-    F --> T1 & T2 & T3 & T4
+    F --> T1 & T2 & T3 & T4 & T5
     D --> E
     E --> P5
     E --> G
@@ -170,6 +187,15 @@ pnpm dev
 ```
 Open [http://localhost:3000](http://localhost:3000) to access the dashboard.
 
+### 6. Supervised Browser Control (optional)
+```bash
+pnpm browser:daemon
+```
+Add a Playwright-type MCP server in Settings → MCP pointing at the daemon's loopback URL, sync tools, and enable the read-only set (`browser_navigate`, `browser_snapshot`, `browser_wait_for`). Origin allowlists, the isolated profile, and headless/headed mode are managed per server; policy edits apply on daemon reload.
+
+### macOS privacy note
+TCC privacy grants attach to the **terminal application that launches the server**, not to Jarvis itself. Grant **Full Disk Access** to that terminal in System Settings → Privacy & Security, and always launch from the same terminal — switching from iTerm to Terminal.app (or an IDE shell) means a fresh grant and silent `EPERM` until it is given.
+
 ---
 
 ## 🧪 Verification & Quality Assurance
@@ -189,6 +215,29 @@ pnpm dotenv -e .env -- exec tsx src/server/api/routers/nimits-jarvis/agent/__tes
 # Update Graphify codebase knowledge graph
 python3 -m graphify update .
 ```
+
+---
+
+## 🎯 Design Principles
+
+1. **Model agnostic** — swap providers without rewriting the agent architecture.
+2. **Capability over provider** — reason about what a model can do (text, vision, reasoning, embeddings, voice), not vendor-specific behavior.
+3. **Primary model ownership** — the user's selected model owns the conversation and final response; specialized models fill capabilities.
+4. **Local-first, cloud-capable** — sensitive processing stays local where practical; cloud runs where explicitly configured.
+5. **Least necessary context** — the agent receives the minimum context to complete a task, not the whole application state.
+6. **Explicit high-impact actions** — consequential external operations require authorization where configured.
+7. **Persistent but controlled memory** — memory improves future turns without injecting full history into every request.
+8. **Extensible execution** — new models, tools, integrations, and modalities arrive through capability and routing layers, not core-loop coupling.
+
+---
+
+## 🗺️ Roadmap
+
+* Configured vision-fallback model (analyze via fallback, primary keeps the response)
+* MCP image-block passthrough into the attachment store
+* Comet rendering-parity probe for browser control
+* Origin-rule match counts + discovery suggestions in Settings
+* Retrieval-based tool discovery if measured payloads demand it
 
 ---
 
