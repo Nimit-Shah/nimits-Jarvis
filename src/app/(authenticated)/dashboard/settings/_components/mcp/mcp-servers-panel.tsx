@@ -7,7 +7,6 @@ import { McpServersPanelSkeleton } from "./mcp-servers-panel.skeleton";
 
 export function McpServersPanel({ instanceId }: { instanceId: string }) {
   const { data: servers, isLoading } = trpc.mcp.listMcpServers.useQuery({ instanceId });
-  const { data: allTools } = trpc.mcp.listMcpServers.useQuery({ instanceId });
 
   if (isLoading) return <McpServersPanelSkeleton />;
 
@@ -38,7 +37,7 @@ export function McpServersPanel({ instanceId }: { instanceId: string }) {
       </div>
       <div className="space-y-2">
         {servers.map((s) => (
-          <McpServerRow key={s.id} server={s as never} instanceId={instanceId} />
+          <McpServerRow key={s.id} server={s} instanceId={instanceId} />
         ))}
       </div>
     </div>

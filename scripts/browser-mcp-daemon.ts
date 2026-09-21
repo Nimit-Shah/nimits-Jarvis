@@ -261,6 +261,11 @@ async function buildArgs(server: ServerRow): Promise<{ args: string[]; spec: Rec
   if (port === null) return { error: `Only loopback URLs are supervised (got ${server.url}).` };
 
   const args = ["--port", String(port), "--timeout-navigation", "60000"];
+  // Vision capability: screenshot/file tools return inline image blocks.
+  // Jarvis persists them into MessageAttachment (origin "mcp") so vision
+  // models can analyze them; without this flag only server-side paths come
+  // back and the model stays blind.
+  args.push("--caps", "vision");
   // No --no-sandbox by default: it exists for Docker/root, not for a
   // normal-user Mac driving a logged-in browser. Explicit opt-in only.
   if (server.noSandbox) args.push("--no-sandbox");

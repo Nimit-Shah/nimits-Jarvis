@@ -99,6 +99,9 @@ export function AddMcpServerDialog({ instanceId, onAdded }: { instanceId: string
               <Input placeholder="http://127.0.0.1:3845/mcp" value={url} onChange={(e) => setUrl(e.target.value)} className="flex-1" />
               {reachability && <McpReachabilityBadge reachability={reachability} />}
             </div>
+            {reachability === "loopback" && (
+              <p className="text-muted-foreground text-xs">Local browser? `pnpm browser:daemon` supervises it.</p>
+            )}
           </div>
           <div className="space-y-1.5">
             <button type="button" onClick={() => setShowAuth(!showAuth)} className="text-primary text-xs hover:underline">

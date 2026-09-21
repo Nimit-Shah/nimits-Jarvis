@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { db } from "~/server/clients/db";
 import { decrypt } from "~/lib/crypto";
+import { ingestMcpScreenshots, type McpContentBlock } from "~/server/lib/browser/mcp-images";
 import {
   assertSafeMcpUrl,
   classifyReachability,
@@ -159,6 +160,45 @@ function normalizeMcpResult(result: unknown): unknown {
   return texts.join("\n") || result;
 }
 
+const SCREENSHOT_HINT_RE = /\.playwright-mcp\/[^\s)]+\.(?:png|jpe?g|webp)/i;
+
+/**
+ * Screenshot last mile: persist MCP image blocks / server-side screenshot
+ * files into MessageAttachment (origin "mcp") and return them view_image
+ * shaped (dataUrl on the volatile tail). Returns null when the result
+ * carries no pixels, letting the text normalizer handle it.
+ */
+async function resolveMcpImages(
+  result: unknown,
+  ctx: { instanceId: string; chatId: string },
+): Promise<unknown | null> {
+  const r = result as { content?: McpContentBlock[] };
+  if (!r || !Array.isArray(r.content)) return null;
+  const hasImage = r.content.some((b) => b.type === "image" && b.data);
+  const hasPathRef =
+    !hasImage && r.content.some((b) => b.type === "text" && b.text && SCREENSHOT_HINT_RE.test(b.text));
+  if (!hasImage && !hasPathRef) return null;
+
+  const text = normalizeMcpResult(result);
+  const textStr = typeof text === "string" ? text : JSON.stringify(text);
+  try {
+    const images = await ingestMcpScreenshots({ instanceId: ctx.instanceId, chatId: ctx.chatId, blocks: r.content });
+    if (images.length === 0) {
+      return {
+        text: textStr,
+        note: "The screenshot was saved on the MCP server but is not readable from here — describe what you need from browser_snapshot instead of retrying.",
+      };
+    }
+    return { text: textStr, screenshots: images };
+  } catch (err) {
+    console.error("[mcp] screenshot ingest failed", { err, chatId: ctx.chatId });
+    return {
+      text: textStr,
+      note: "The screenshot could not be attached for viewing — describe what you need from browser_snapshot instead of retrying.",
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // getOrCreateMcpClient — single server, idle TTL, fail-fast, no retry loop
 // ---------------------------------------------------------------------------
@@ -292,6 +332,7 @@ export async function syncToolsForServer(serverId: string): Promise<void> {
 export async function getOrCreateMcpTools(
   instanceId: string,
   source: "web" | "telegram" | "cron",
+  chatId?: string,
 ): Promise<ToolSet> {
   try {
     const rows = (await db.mcpTool.findMany({
@@ -313,11 +354,12 @@ export async function getOrCreateMcpTools(
     );
 
     const set: ToolSet = {};
+    const imgCtx = chatId ? { instanceId, chatId } : null;
     for (const row of usable) {
       set[row.namespacedName] = tool({
         description: row.description ?? undefined,
         inputSchema: jsonSchema(row.inputSchema as JSONSchema7),
-        execute: async (args) => callMcpTool(row, args),
+        execute: async (args) => callMcpTool(row, args, imgCtx),
       });
     }
     return set;
@@ -327,7 +369,11 @@ export async function getOrCreateMcpTools(
   }
 }
 
-async function callMcpTool(row: McpToolWithServer, args: unknown): Promise<unknown> {
+async function callMcpTool(
+  row: McpToolWithServer,
+  args: unknown,
+  imgCtx: { instanceId: string; chatId: string } | null,
+): Promise<unknown> {
   const timeout = TOOL_TIMEOUT_OVERRIDES[row.originalName] ?? CALL_TIMEOUT_MS;
   try {
     const client = await getOrCreateMcpClient(row.server);
@@ -335,6 +381,10 @@ async function callMcpTool(row: McpToolWithServer, args: unknown): Promise<unkno
       client.callTool({ name: row.originalName, arguments: args as Record<string, unknown> }),
       timeout,
     );
+    if (imgCtx) {
+      const withImages = await resolveMcpImages(result, imgCtx);
+      if (withImages) return withImages;
+    }
     return normalizeMcpResult(result);
   } catch (err) {
     const msg = describeError(err);
@@ -350,6 +400,10 @@ async function callMcpTool(row: McpToolWithServer, args: unknown): Promise<unkno
           client.callTool({ name: row.originalName, arguments: args as Record<string, unknown> }),
           timeout,
         );
+        if (imgCtx) {
+          const withImages = await resolveMcpImages(result, imgCtx);
+          if (withImages) return withImages;
+        }
         return normalizeMcpResult(result);
       } catch (retryErr) {
         err = retryErr;

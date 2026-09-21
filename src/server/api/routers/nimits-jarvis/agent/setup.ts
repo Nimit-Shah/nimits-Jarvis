@@ -712,7 +712,7 @@ export async function prepareAgentRun(
 
   // MCP tools — lazy, never throws, never blocks on network (cached schemas only)
   const { getOrCreateMcpTools } = await import("~/server/clients/mcp");
-  const rawMcpTools = await getOrCreateMcpTools(instance.id, source);
+  const rawMcpTools = await getOrCreateMcpTools(instance.id, source, chatId);
 
   const userRow = await db.message.create({
     data: {

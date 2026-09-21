@@ -6,35 +6,15 @@ import { Switch } from "~/components/ui/switch";
 import { Button } from "~/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "~/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~/components/ui/tooltip";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { trpc } from "~/clients/trpc";
 import { McpReachabilityBadge } from "./mcp-reachability-badge";
 import { McpStatusBadge } from "./mcp-status-badge";
-import { McpServerToolsList } from "./mcp-server-tools-list";
-import { McpOriginRules } from "./mcp-origin-rules";
+import { McpServerToolsTab } from "./mcp-server-tools-tab";
+import { McpBrowserTab } from "./mcp-browser-tab";
+import type { McpServerSummary } from "./mcp-server-type";
 
-type Server = {
-  id: string;
-  name: string;
-  label: string;
-  url: string;
-  enabled: boolean;
-  status: string;
-  lastError: string | null;
-  needsSync: boolean;
-  hasHeaders: boolean;
-  reachability: string;
-  reachableHere: boolean;
-  toolCount: number;
-  enabledToolCount: number;
-  serverType?: string;
-  originMode?: string;
-  policyApplying?: boolean;
-  noSandbox?: boolean;
-  infraSeedEnabled?: boolean;
-  infraSeedExcluded?: string[];
-};
-
-export function McpServerRow({ server, instanceId }: { server: Server; instanceId: string }) {
+export function McpServerRow({ server, instanceId }: { server: McpServerSummary; instanceId: string }) {
   const [expanded, setExpanded] = useState(false);
   const utils = trpc.useUtils();
   const toggle = trpc.mcp.toggleMcpServer.useMutation({ onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }) });
@@ -43,11 +23,12 @@ export function McpServerRow({ server, instanceId }: { server: Server; instanceI
   const del = trpc.mcp.deleteMcpServer.useMutation({ onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }) });
 
   const dimmed = !server.reachableHere;
+  const isPlaywright = server.serverType === "playwright";
 
   return (
     <div className={`rounded-md border ${dimmed ? "opacity-60" : ""}`}>
       <div className="flex items-center gap-2 px-3 py-2">
-        <button onClick={() => setExpanded(!expanded)} className="shrink-0">
+        <button onClick={() => setExpanded(!expanded)} className="shrink-0" aria-label={expanded ? "Collapse" : "Expand"}>
           {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
         </button>
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{server.label}</span>
@@ -58,8 +39,11 @@ export function McpServerRow({ server, instanceId }: { server: Server; instanceI
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
-                <span>
+                <span className="flex items-center gap-1">
                   <McpStatusBadge status={server.status} needsSync={server.needsSync} />
+                  {server.policyApplying && (
+                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">Applying…</span>
+                  )}
                 </span>
               </TooltipTrigger>
               {server.lastError && (
@@ -71,7 +55,7 @@ export function McpServerRow({ server, instanceId }: { server: Server; instanceI
           </TooltipProvider>
         )}
         <span className="text-muted-foreground whitespace-nowrap text-xs">
-          {server.enabledToolCount} of {server.toolCount} enabled
+          {server.enabledToolCount}/{server.toolCount} tools
         </span>
         <Popover>
           <PopoverTrigger asChild>
@@ -105,19 +89,27 @@ export function McpServerRow({ server, instanceId }: { server: Server; instanceI
         <Switch checked={server.enabled} onCheckedChange={(v) => void toggle.mutateAsync({ serverId: server.id, enabled: v })} />
       </div>
       {expanded && (
-        <div className="border-t">
-          {server.serverType === "playwright" && (
-            <McpOriginRules
-              serverId={server.id}
-              instanceId={instanceId}
-              originMode={server.originMode ?? "open"}
-              policyApplying={server.policyApplying ?? false}
-              noSandbox={server.noSandbox ?? false}
-              infraSeedEnabled={server.infraSeedEnabled ?? true}
-              infraSeedExcluded={server.infraSeedExcluded ?? []}
-            />
-          )}
-          <McpServerToolsList serverId={server.id} enabled={server.enabled} />
+        <div className="border-t px-3 pt-2">
+          <Tabs defaultValue="tools">
+            <TabsList className="h-7">
+              <TabsTrigger value="tools" className="text-[11px]">
+                Tools
+              </TabsTrigger>
+              {isPlaywright && (
+                <TabsTrigger value="browser" className="text-[11px]">
+                  Browser
+                </TabsTrigger>
+              )}
+            </TabsList>
+            <TabsContent value="tools">
+              <McpServerToolsTab serverId={server.id} serverEnabled={server.enabled} isPlaywright={isPlaywright} />
+            </TabsContent>
+            {isPlaywright && (
+              <TabsContent value="browser">
+                <McpBrowserTab server={server} instanceId={instanceId} />
+              </TabsContent>
+            )}
+          </Tabs>
         </div>
       )}
       {test.data && (

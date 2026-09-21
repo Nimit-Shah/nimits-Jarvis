@@ -95,7 +95,7 @@ export function CronJobsSettings() {
   };
 
   return (
-    <Card>
+    <Card id="cron-jobs" className="scroll-mt-4">
       <CardHeader>
         <CardTitle>Scheduled Tasks</CardTitle>
         <CardDescription>
