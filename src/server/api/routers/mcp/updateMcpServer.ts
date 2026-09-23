@@ -46,6 +46,7 @@ export const updateMcpServer = protectedProcedure
       "userDataDir",
       "cdpEndpoint",
       "cdpConfirmed",
+      "extensionConfirmed",
       "headless",
       "noSandbox",
       "infraSeedEnabled",

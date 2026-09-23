@@ -33,6 +33,7 @@ type McpServerRow = {
   headersEnc: string | null;
   browserMode?: string | null;
   cdpConfirmed?: boolean | null;
+  extensionConfirmed?: boolean | null;
 };
 
 type McpToolWithServer = {
@@ -171,7 +172,7 @@ const SCREENSHOT_HINT_RE = /\.playwright-mcp\/[^\s)]+\.(?:png|jpe?g|webp)/i;
 async function resolveMcpImages(
   result: unknown,
   ctx: { instanceId: string; chatId: string },
-): Promise<unknown | null> {
+): Promise<unknown> {
   const r = result as { content?: McpContentBlock[] };
   if (!r || !Array.isArray(r.content)) return null;
   const hasImage = r.content.some((b) => b.type === "image" && b.data);
@@ -347,10 +348,11 @@ export async function getOrCreateMcpTools(
     const usable = rows.filter(
       (r) =>
         isReachableHere(classifyReachability(r.server.url)) &&
-        // CDP attaches to a live, possibly authenticated browser: explicit
-        // per-server opt-in, and never on unattended sources. Gate by
-        // availability, not runtime rejection.
-        (r.server.browserMode !== "cdp" || (source === "web" && r.server.cdpConfirmed === true)),
+        // CDP and extension modes attach to a live, possibly authenticated
+        // browser: explicit per-server opt-in each, and never on unattended
+        // sources. Gate by availability, not runtime rejection.
+        (r.server.browserMode !== "cdp" || (source === "web" && r.server.cdpConfirmed === true)) &&
+        (r.server.browserMode !== "extension" || (source === "web" && r.server.extensionConfirmed === true)),
     );
 
     const set: ToolSet = {};

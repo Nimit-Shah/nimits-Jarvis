@@ -77,6 +77,11 @@ export const env = createEnv({
     TTS_VOICE: z.string().default("s2.1-pro-free"),
     // Mnemosyne local sidecar
     MNEMOSYNE_URL: z.string().url().default("http://127.0.0.1:3999"),
+
+    // Playwright browser extension token (optional — extension mode refused
+    // when missing). Consumed only by browser-mcp-daemon via process.env;
+    // server-side only, never logged, never exposed to the client.
+    PLAYWRIGHT_MCP_EXTENSION_TOKEN: z.string().min(8).optional(),
   },
   client: {
     NEXT_PUBLIC_APP_URL: z.string().url().default("http://localhost:3000"),
@@ -111,6 +116,7 @@ export const env = createEnv({
     TTS_PROVIDER: process.env.TTS_PROVIDER,
     TTS_VOICE: process.env.TTS_VOICE,
     MNEMOSYNE_URL: process.env.MNEMOSYNE_URL,
+    PLAYWRIGHT_MCP_EXTENSION_TOKEN: process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN,
 
     // Client URL resolution:
     //  - dev: derive from PORT so `PORT=3001 pnpm dev` just works

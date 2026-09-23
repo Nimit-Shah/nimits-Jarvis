@@ -198,12 +198,16 @@ model McpServer {
   infraSeedExcluded    String[] @default([]) // seed entries the operator turned off
 
   // Browser launch config (serverType playwright; consumed by daemon).
-  browserMode    String  @default("bundled") // bundled | channel | executable | cdp
+  browserMode    String  @default("bundled") // bundled | channel | executable | cdp | extension
   browserChannel String? // "chrome" | "msedge" | "chrome-beta"
   executablePath String? // e.g. /Applications/Comet.app/Contents/MacOS/Comet
   userDataDir    String? // dedicated profile dir; never a main-browser profile
   cdpEndpoint    String? // http://127.0.0.1:9222; explicit opt-in only
   cdpConfirmed   Boolean @default(false)
+  // Extension bridge: drives the OPEN Comet/Chrome via the Playwright
+  // extension (live profile + logins). Separate flag from CDP — separate
+  // surface, separate audit trail. Token lives in env, never here.
+  extensionConfirmed Boolean @default(false)
   headless       Boolean @default(false)
   noSandbox      Boolean @default(false) // Docker/root only; never default on macOS
 

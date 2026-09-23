@@ -57,6 +57,7 @@ export const listMcpServers = protectedProcedure
         userDataDir: s.userDataDir,
         cdpEndpoint: s.cdpEndpoint,
         cdpConfirmed: s.cdpConfirmed,
+        extensionConfirmed: s.extensionConfirmed,
         headless: s.headless,
         noSandbox: s.noSandbox,
         infraSeedEnabled: s.infraSeedEnabled,

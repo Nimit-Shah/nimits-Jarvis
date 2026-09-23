@@ -142,6 +142,7 @@ type ServerRow = {
   userDataDir: string | null;
   cdpEndpoint: string | null;
   cdpConfirmed: boolean;
+  extensionConfirmed: boolean;
   headless: boolean;
   noSandbox: boolean;
   infraSeedEnabled: boolean;
@@ -256,7 +257,7 @@ async function preflight(servers: ServerRow[]): Promise<string[]> {
 // Launch-spec assembly
 // ---------------------------------------------------------------------------
 
-async function buildArgs(server: ServerRow): Promise<{ args: string[]; spec: Record<string, unknown> } | { error: string }> {
+export async function buildArgs(server: ServerRow): Promise<{ args: string[]; spec: Record<string, unknown> } | { error: string }> {
   const port = portFromUrl(server.url);
   if (port === null) return { error: `Only loopback URLs are supervised (got ${server.url}).` };
 
@@ -269,7 +270,9 @@ async function buildArgs(server: ServerRow): Promise<{ args: string[]; spec: Rec
   // No --no-sandbox by default: it exists for Docker/root, not for a
   // normal-user Mac driving a logged-in browser. Explicit opt-in only.
   if (server.noSandbox) args.push("--no-sandbox");
-  if (server.headless) args.push("--headless");
+  // No --headless for attached modes (cdp/extension): there is no launched
+  // browser to head.
+  if (server.headless && server.browserMode !== "cdp" && server.browserMode !== "extension") args.push("--headless");
   if (server.browserMode === "channel") args.push("--browser", server.browserChannel ?? "chrome");
   else if (server.browserMode === "executable") {
     if (!server.executablePath) return { error: "browserMode executable needs executablePath." };
@@ -277,11 +280,26 @@ async function buildArgs(server: ServerRow): Promise<{ args: string[]; spec: Rec
   } else if (server.browserMode === "cdp") {
     if (!server.cdpEndpoint || !server.cdpConfirmed) return { error: "CDP needs cdpEndpoint + explicit confirmation." };
     args.push("--cdp-endpoint", server.cdpEndpoint);
+  } else if (server.browserMode === "extension") {
+    // Extension bridge: drives the OPEN Comet/Chrome (live profile + logins)
+    // via the Playwright extension. Token comes from env
+    // (PLAYWRIGHT_MCP_EXTENSION_TOKEN) — never args, never the spec record.
+    // No userDataDir: the live profile is the point. Same risk class as CDP.
+    if (!process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN) {
+      return { error: "Extension mode needs PLAYWRIGHT_MCP_EXTENSION_TOKEN in the daemon environment (.env) — see .env.example." };
+    }
+    if (!server.extensionConfirmed) return { error: "Extension mode needs explicit confirmation (live browser with your logins)." };
+    // The relay locates the extension in the DEFAULT profile dir of the
+    // resolved browser (Chrome's tree unless told otherwise). Comet users
+    // must set executablePath to the Comet binary so it looks in Comet's
+    // tree instead — otherwise "Extension not found" (verified live).
+    if (server.executablePath) args.push("--executable-path", server.executablePath);
+    args.push("--extension");
   } else {
     args.push("--browser", "chrome");
   }
 
-  if (server.browserMode !== "cdp") {
+  if (server.browserMode !== "cdp" && server.browserMode !== "extension") {
     const dir = server.userDataDir ?? defaultProfileDir(server.name);
     const check = validateDedicatedProfileDir(dir);
     if (!check.ok) return { error: check.message };
@@ -396,15 +414,21 @@ function startChild(s: Supervised, cliJs: string, args: string[], spec: Record<s
   }, HEALTHY_AFTER_MS);
 }
 
-function isPortFree(port: number): Promise<boolean> {
+function probeHost(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const sock = connect(port, "127.0.0.1");
+    const sock = connect(port, host);
     sock.on("connect", () => {
       sock.destroy();
       resolve(false);
     });
     sock.on("error", () => resolve(true));
   });
+}
+
+async function isPortFree(port: number): Promise<boolean> {
+  // Probe both stacks: the MCP server may bind ::1 only, in which case a
+  // 127.0.0.1 probe falsely reports free (this once wedged appliedPolicyVersion).
+  return (await probeHost(port, "127.0.0.1")) && (await probeHost(port, "::1"));
 }
 
 async function waitForPortFree(port: number, timeoutMs: number): Promise<boolean> {
@@ -531,4 +555,8 @@ async function main(): Promise<void> {
   await loop();
 }
 
-void main();
+// Entrypoint only when run directly (`pnpm browser:daemon`) — importable
+// for unit tests (buildArgs) without side effects.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  void main();
+}
