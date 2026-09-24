@@ -17,7 +17,6 @@ import { expireChatRun } from "~/server/clients/redis";
 interface RunEntry {
   controller: AbortController;
   heartbeat: NodeJS.Timeout | null;
-  watchdog: NodeJS.Timeout | null;
 }
 
 const g = globalThis as unknown as {
@@ -31,7 +30,7 @@ export const canBackground = !process.env.VERCEL;
 export function registerRun(streamId: string): AbortController {
   releaseRun(streamId);
   const controller = new AbortController();
-  runs.set(streamId, { controller, heartbeat: null, watchdog: null });
+  runs.set(streamId, { controller, heartbeat: null });
   return controller;
 }
 
@@ -64,27 +63,5 @@ export function releaseRun(streamId: string): void {
   if (entry?.heartbeat) {
     clearInterval(entry.heartbeat);
   }
-  if (entry?.watchdog) {
-    clearTimeout(entry.watchdog);
-  }
   runs.delete(streamId);
-}
-
-/**
- * Best-effort duration watchdog: fires before the platform duration cap so
- * an over-long run is marked `timed_out` instead of dying silently at the
- * platform kill. Cleared automatically by releaseRun().
- */
-export function armRunTimeout(
-  streamId: string,
-  ms: number,
-  onTimeout: () => void,
-): void {
-  const entry = runs.get(streamId);
-  if (!entry || entry.watchdog) return;
-  entry.watchdog = setTimeout(() => {
-    entry.watchdog = null;
-    onTimeout();
-  }, ms);
-  entry.watchdog.unref?.();
 }

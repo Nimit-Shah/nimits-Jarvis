@@ -109,3 +109,8 @@ docs/PHASE_B_FS_WRITE.md
 LEAN-CTX.md
 *.bak
 .opencode/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo

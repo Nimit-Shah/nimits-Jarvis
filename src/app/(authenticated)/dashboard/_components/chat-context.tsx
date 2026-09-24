@@ -114,28 +114,93 @@ export function ChatProvider({
   const allHistoryMessages =
     chatId === null ? [] : [...pages].reverse().flatMap((p) => p.messages);
 
-  const initialMessages: UIMessage[] = allHistoryMessages.map((msg) => ({
-    id: msg.id,
-    role: msg.role,
-    parts: [
-      ...(msg.content as UIMessage["parts"]),
-      // Sent images render from the same-origin serving route (img-src 'self'
-      // covers them — no blob: data: URLs needed). Array order is the index.
-      ...((msg as { attachments?: Array<{ id: string }> }).attachments ?? []).map(
-        (a) => ({
-          type: "file" as const,
-          mediaType: "image/webp",
-          url: `/api/attachments/${a.id}?variant=thumb`,
-        }),
-      ),
-    ],
-    // Carry the DB timestamp through the UI so hover timestamps work for
-    // loaded history. This metadata is client-only and never sent to the LLM.
-    metadata: { createdAt: msg.createdAt.toISOString() },
-  }));
-
   const streamId =
     chatId === null ? null : (streamingQuery.data?.messageId ?? null);
+  const hasActiveStream = streamId !== null;
+
+  const initialMessages: UIMessage[] = allHistoryMessages.map((msg) => {
+    const rawParts = (msg.content as UIMessage["parts"]) ?? [];
+    let parts = rawParts;
+    const runStatus =
+      (msg as { runStatus?: string | null }).runStatus ?? null;
+    // Normalize interrupted history: any tool still waiting on an output when
+    // the run is terminal (or there is no active stream) can never complete —
+    // mark it terminal so spinners stop and auto-resend stays off. Skip while
+    // a live stream may still deliver the missing output.
+    const shouldNormalize =
+      msg.role === "assistant" && (runStatus !== null || !hasActiveStream);
+    if (shouldNormalize) {
+      parts = parts.map((part) => {
+        const p = part as { type: string; state?: string };
+        const isTool =
+          p.type === "dynamic-tool" ||
+          (typeof p.type === "string" && p.type.startsWith("tool-"));
+        if (
+          isTool &&
+          (p.state === "input-streaming" || p.state === "input-available")
+        ) {
+          return {
+            ...part,
+            state: "output-error",
+            errorText: "Run interrupted",
+          } as UIMessage["parts"][number];
+        }
+        return part;
+      });
+      // Interrupted run that never wrote content — show a terminal notice
+      // instead of a blank assistant bubble.
+      if (parts.length === 0) {
+        if (runStatus !== null && runStatus !== "completed") {
+          parts = [
+            {
+              type: "text",
+              text:
+                runStatus === "timed_out"
+                  ? "Run timed out before any output was saved."
+                  : `Run ${runStatus} before any output was saved.`,
+            },
+          ];
+        } else if (runStatus === null && !hasActiveStream) {
+          // Pre-fix rows died without ever writing runStatus or content.
+          parts = [
+            {
+              type: "text",
+              text: "Run interrupted before any output was saved.",
+            },
+          ];
+        }
+      }
+    }
+    return {
+      id: msg.id,
+      role: msg.role,
+      parts: [
+        ...parts,
+        // Sent images render from the same-origin serving route (img-src 'self'
+        // covers them — no blob: data: URLs needed). Array order is the index.
+        ...((msg as { attachments?: Array<{ id: string }> }).attachments ?? []).map(
+          (a) => ({
+            type: "file" as const,
+            mediaType: "image/webp",
+            url: `/api/attachments/${a.id}?variant=thumb`,
+          }),
+        ),
+      ],
+      // Carry the DB timestamp through the UI so hover timestamps work for
+      // loaded history. This metadata is client-only and never sent to the LLM.
+      metadata: {
+        createdAt: msg.createdAt.toISOString(),
+        ...(parts.some(
+          (p) =>
+            (p as { state?: string }).state === "output-error" &&
+            (p as { errorText?: string }).errorText === "Run interrupted",
+        )
+          ? { interrupted: true }
+          : {}),
+      },
+    };
+  });
+
   const timezone = instanceQuery.data?.timezone ?? DEFAULT_TIMEZONE;
 
   return (

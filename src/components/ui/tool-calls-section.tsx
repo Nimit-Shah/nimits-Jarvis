@@ -166,10 +166,15 @@ export function ToolCallsSection({
   const extraCount = uniqueIcons.length - maxIconsToShow;
 
   const hasErrors = toolCalls.some((c) => c.state === "output-error");
-  const runningCount = toolCalls.filter(
+  // A settled stream leaves lingering input-* parts on interrupted runs —
+  // never spin those; only show loaders while the chat is still streaming.
+  const streamSettled = isStreaming === false;
+  const pendingCount = toolCalls.filter(
     (c) => c.state === "input-streaming" || c.state === "input-available",
   ).length;
-  const isRunning = runningCount > 0;
+  const isRunning = pendingCount > 0 && !streamSettled;
+  const interruptedCount = streamSettled ? pendingCount : 0;
+  const hasInterrupted = interruptedCount > 0;
 
   // --- Collapsed state machine (Claude.ai-inspired) ---
   const runningTools = useMemo(
@@ -262,6 +267,13 @@ export function ToolCallsSection({
         showLoader: true,
       };
     }
+    // Settled mid-tool: run stopped before outputs arrived — no spinner.
+    if (hasInterrupted) {
+      return {
+        collapsedLabel: `${aggregatedSummary || `Used ${toolCalls.length} tools`} — interrupted`,
+        showLoader: false,
+      };
+    }
     // State 3 — turn complete: always end on tools aggregate (not gloss)
     if (hasErrors) {
       // Show failed tool machine name if single failure, else aggregate with — failed
@@ -284,6 +296,7 @@ export function ToolCallsSection({
     toolCalls,
     runningTools,
     isRunning,
+    hasInterrupted,
     lastReasoningGloss,
     mostRecentGloss,
     aggregatedSummary,
@@ -291,7 +304,7 @@ export function ToolCallsSection({
   ]);
 
   const isStreamingEffective = isStreaming ?? isRunning;
-  const shouldShimmer = isStreamingEffective;
+  const shouldShimmer = isStreamingEffective && !streamSettled;
 
   // --- Ordered render nodes: interleave reasoning, group consecutive tool runs ---
   const items: ChainItem[] = useMemo(() => {
@@ -346,9 +359,11 @@ export function ToolCallsSection({
     const hasDetails = call.inputs || call.output;
     const k = `${key}:${call.tool_call_id ?? displayName}`;
     const isCallExpanded = expandedCalls.has(k);
-    const isCallRunning =
+    const isCallPending =
       call.state === "input-streaming" || call.state === "input-available";
-    const isCallError = call.state === "output-error";
+    const isCallRunning = isCallPending && !streamSettled;
+    const isCallInterrupted = isCallPending && streamSettled;
+    const isCallError = call.state === "output-error" || isCallInterrupted;
 
     // Rendered output cap: full text stays behind the copy button.
     const output = call.output;
@@ -402,9 +417,11 @@ export function ToolCallsSection({
                   isCallError ? "text-destructive" : "text-muted-foreground",
                 )}
               >
-                {isCallError
-                  ? call.message || `Failed: ${displayName}`
-                  : displayName}
+                {isCallInterrupted
+                  ? `Interrupted: ${displayName}`
+                  : isCallError
+                    ? call.message || `Failed: ${displayName}`
+                    : displayName}
               </span>
               {/* Primary argument only — no JSON in the collapsed state */}
               {!isCallError && arg && (
@@ -711,10 +728,12 @@ export function ToolCallsSection({
             // Group of consecutive tool calls
             const groupKey = `group-${nodeIdx}`;
             const isGroupExpanded = expandedGroups.has(nodeIdx);
-            const groupRunning = node.entries.some(
+            const groupPending = node.entries.some(
               (c) =>
                 c.state === "input-streaming" || c.state === "input-available",
             );
+            const groupRunning = groupPending && !streamSettled;
+            const groupInterrupted = groupPending && streamSettled;
             return (
               <div key={groupKey} className="flex items-stretch gap-2">
                 <div className="flex flex-col items-center self-stretch">
@@ -745,6 +764,10 @@ export function ToolCallsSection({
                     {groupRunning ? (
                       <span className="text-muted-foreground/60 text-[11px]">
                         running…
+                      </span>
+                    ) : groupInterrupted ? (
+                      <span className="text-muted-foreground/60 text-[11px]">
+                        interrupted
                       </span>
                     ) : null}
                     {isGroupExpanded ? (

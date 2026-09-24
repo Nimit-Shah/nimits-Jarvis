@@ -3,6 +3,7 @@ import { smoothStream, UI_MESSAGE_STREAM_HEADERS } from "ai";
 import { z } from "zod";
 import { auth } from "~/server/auth";
 import { prepareAgentRun } from "~/server/api/routers/nimits-jarvis/agent/setup";
+import { formatStreamError } from "~/server/api/routers/nimits-jarvis/agent/error-parser";
 import { PIIVault } from "~/server/api/routers/nimits-jarvis/agent/pii";
 import { decrypt } from "~/lib/crypto";
 import { stripResidualTokens } from "~/server/api/routers/nimits-jarvis/agent/pii/brands";
@@ -20,7 +21,6 @@ import {
   takeRunAssistant,
 } from "~/server/clients/redis";
 import {
-  armRunTimeout,
   canBackground,
   cancelRun,
   registerRun,
@@ -371,25 +371,42 @@ export async function POST(request: Request) {
     if (error instanceof Error && error.message.startsWith("MODEL_NO_VISION:")) {
       return new Response(error.message.replace(/^MODEL_NO_VISION:\s*/, ""), { status: 400 });
     }
-    throw error;
+    return new Response(formatStreamError(error), { status: 500 });
   }
 
   const { agent, messages, piiVault, metrics, assistantMessageId } =
     prepareResult.result;
 
-  const markRunStatus = async (runStatus: string) => {
+  const markRunStatus = async (runStatus: string, noticeOverride?: string) => {
     try {
       const row = await db.message.findUnique({
         where: { id: assistantMessageId },
-        select: { runStatus: true },
+        select: { runStatus: true, content: true },
       });
       // Never overwrite a terminal state written by onFinish.
-      if (!row?.runStatus) {
-        await db.message.update({
-          where: { id: assistantMessageId },
-          data: { runStatus },
-        });
-      }
+      if (row?.runStatus) return;
+      const content = row?.content;
+      const contentEmpty = !Array.isArray(content) || content.length === 0;
+      // Interrupted before any step checkpoint wrote content — leave a
+      // terminal notice instead of a silent empty assistant bubble.
+      const notice =
+        noticeOverride ??
+        (runStatus === "timed_out"
+          ? "Run timed out before any output was saved."
+          : runStatus === "failed"
+            ? "Run failed before any output was saved."
+            : runStatus === "cancelled" || runStatus === "aborted"
+              ? "Run was cancelled before any output was saved."
+              : `Run ${runStatus} before any output was saved.`);
+      await db.message.update({
+        where: { id: assistantMessageId },
+        data: {
+          runStatus,
+          ...(contentEmpty
+            ? { content: [{ type: "text", text: notice }] }
+            : {}),
+        },
+      });
     } catch (err) {
       console.error("[chat] run-status marking failed:", err);
     }
@@ -400,16 +417,6 @@ export async function POST(request: Request) {
   // Link the stream to its pre-created assistant row for out-of-band
   // terminal marking (explicit cancel).
   await setRunAssistant(streamId, assistantMessageId);
-  // Watchdog fires just before the route's maxDuration cap (300s) so an
-  // over-long run is marked timed_out instead of dying silently.
-  armRunTimeout(streamId, 290_000, () => {
-    console.warn("[chat] run exceeded duration cap", { chatId, streamId });
-    void (async () => {
-      await markRunStatus("timed_out");
-      cancelRun(streamId);
-      await releaseChatRun(chatId, streamId);
-    })();
-  });
 
   // Client disconnect: in background-capable runtimes the run continues
   // (chat switches unmount the stream without killing it); otherwise the
@@ -446,8 +453,9 @@ export async function POST(request: Request) {
     console.error("[chat] agent.stream failed:", error);
     releaseRun(streamId);
     await releaseChatRun(chatId, streamId);
-    await markRunStatus("failed");
-    return new Response("Generation failed", { status: 500 });
+    const message = formatStreamError(error);
+    await markRunStatus("failed", message);
+    return new Response(message, { status: 500 });
   }
 
   const firstByte = firstByteTimingTransform((ms) => {
@@ -456,6 +464,22 @@ export async function POST(request: Request) {
 
   const streamContext = getStreamContext();
   const response = result.toUIMessageStreamResponse({
+    // Surface any stream/generation failure as a readable message in the
+    // client toast — and, if onFinish never runs, mark the empty assistant
+    // row failed and release the run so the chat is never left blocked.
+    onError: (error: unknown) => {
+      console.error("[chat] stream error:", error);
+      const message = formatStreamError(error);
+      const aborted =
+        message === "Stopped." ||
+        (error instanceof Error && error.name === "AbortError");
+      void (async () => {
+        await markRunStatus(aborted ? "aborted" : "failed", message);
+        releaseRun(streamId);
+        await releaseChatRun(chatId, streamId);
+      })();
+      return message;
+    },
     headers: {
       "X-Stream-Id": streamId,
       // Lets an unsaved New Chat client learn its fresh thread id and

@@ -310,7 +310,8 @@ model Message {
   // interrupted run as a silent empty message.
   runStatus String?
 
-  createdAt DateTime             @default(now())
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @default(now()) @updatedAt
   instance  ComposioClawInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
   chat      Chat?                @relation(fields: [chatId], references: [id], onDelete: Cascade)
   attachments MessageAttachment[]

@@ -12,6 +12,65 @@ import { useInstanceId } from "~/hooks/use-instance-id";
 import { useChatId } from "~/hooks/use-chat-id";
 import { showErrorToast } from "~/components/core/toast-notifications";
 
+type AnyToolPart = {
+  type: string;
+  state?: string;
+  errorText?: string;
+};
+
+function isPendingToolPart(part: UIMessage["parts"][number]): boolean {
+  const p = part as unknown as AnyToolPart;
+  if (p.type !== "dynamic-tool" && !p.type.startsWith("tool-")) return false;
+  return p.state === "input-streaming" || p.state === "input-available";
+}
+
+/**
+ * When the stream settles (ready/error/abort), any tool still in an input-*
+ * state will never receive an output — convert it to `output-error` so the
+ * UI stops spinning, and stamp `metadata.interrupted` so auto-resend does
+ * not treat the message as a completed tool-call step.
+ */
+function repairInterruptedMessages(messages: UIMessage[]): UIMessage[] {
+  let changed = false;
+  const next = messages.map((msg) => {
+    if (msg.role !== "assistant") return msg;
+    let msgChanged = false;
+    const parts = msg.parts.map((part) => {
+      if (!isPendingToolPart(part)) return part;
+      msgChanged = true;
+      return {
+        ...part,
+        state: "output-error",
+        errorText: "Run interrupted",
+      } as UIMessage["parts"][number];
+    });
+    if (!msgChanged) return msg;
+    changed = true;
+    return {
+      ...msg,
+      parts,
+      metadata: {
+        ...(msg.metadata as object | undefined),
+        interrupted: true,
+      },
+    };
+  });
+  return changed ? next : messages;
+}
+
+/**
+ * Auto-send only when the last assistant step has fully completed tool calls
+ * AND that message was not marked interrupted — converting stuck parts to
+ * output-error would otherwise satisfy the SDK predicate and re-POST.
+ */
+function shouldSendAfterTools({ messages }: { messages: UIMessage[] }): boolean {
+  const last = messages[messages.length - 1];
+  if ((last?.metadata as { interrupted?: boolean } | undefined)?.interrupted) {
+    return false;
+  }
+  return lastAssistantMessageIsCompleteWithToolCalls({ messages });
+}
+
 /**
  * Parses a `409 run_in_progress` transport error body.
  * Returns null when the error is anything else.
@@ -135,7 +194,7 @@ export function useChatHook({
     id: `chat-${chatId ?? "new"}`,
     transport,
     resume: streamId !== null,
-    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
+    sendAutomaticallyWhen: shouldSendAfterTools,
     onFinish: () => {
       void utils.nimitsJarvis.getHistory.invalidate();
       void utils.chats.list.invalidate();
@@ -178,8 +237,25 @@ export function useChatHook({
       void utils.chats.list.invalidate();
       const msg = error.message || "An error occurred";
       showErrorToast(msg);
+      // Settle the message parts so interrupted tools stop spinning even
+      // when the status-transition effect misses a same-tick error.
+      chatApiRef.current?.setMessages((msgs) => repairInterruptedMessages(msgs));
     },
   });
+
+  // When the run settles (ready or error), convert any tool still waiting
+  // on an output into a terminal error state. Without this, a mid-tool
+  // abort leaves input-available parts forever — spinner never stops and
+  // history rehydration replays the stuck state.
+  const prevStatusRef = useRef(chat.status);
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = chat.status;
+    if (prev !== "submitted" && prev !== "streaming") return;
+    if (chat.status === "ready" || chat.status === "error") {
+      chat.setMessages((msgs) => repairInterruptedMessages(msgs));
+    }
+  }, [chat.status, chat.setMessages]);
 
   chatApiRef.current = {
     setMessages: chat.setMessages,

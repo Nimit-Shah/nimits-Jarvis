@@ -55,6 +55,33 @@ function extractReasoningGloss(text: string): string | undefined {
   const words = first.split(/\s+/).slice(0, 10).join(" ");
   return words.length > 3 ? words : undefined;
 }
+
+/** Structured tool failure returned by wrapToolExecutors / MCP (never thrown). */
+function isErrorToolOutput(
+  value: unknown,
+): value is { isError: true; message?: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { isError?: unknown }).isError === true
+  );
+}
+
+type StepLike = {
+  text: string;
+  reasoningText?: string | undefined;
+  reasoning?: Array<{ text?: string }> | undefined;
+  toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
+  toolResults?: Array<{ toolCallId?: string; output?: unknown }> | undefined;
+  content?: Array<{
+    type: string;
+    toolCallId?: string;
+    toolName?: string;
+    input?: unknown;
+    error?: unknown;
+    output?: unknown;
+  }> | undefined;
+};
 import { stripToolResultEchoes } from "./strip-tool-echoes";
 import {
   clearStreamingMessage,
@@ -193,11 +220,17 @@ function wrapToolExecutors(
           // Step 3: Sanitize error messages — any PII that leaked into
           // the error message (e.g. "Failed to send to john@example.com")
           // must be re-redacted before it reaches the LLM context.
+          // Tool executors must not throw: return a structured error so the
+          // step completes, onFinish persists the failure, and the loop can
+          // continue (same contract as MCP tools).
+          let message =
+            error instanceof Error ? error.message : String(error);
           if (vault && error instanceof Error) {
             // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-            error.message = await vault.redact(error.message);
+            message = await vault.redact(message);
           }
-          throw error;
+          console.error("[agent/tool] executor failed", name, message);
+          return { isError: true, message } as const;
         }
 
         // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
@@ -879,6 +912,186 @@ export async function prepareAgentRun(
     startedAt: Date.now(),
   };
 
+  // Incremental content checkpoint: every completed step is persisted so an
+  // abort/timeout mid-run still leaves text + ToolResults on the assistant
+  // row (onFinish only runs on a clean terminal path).
+  const completedSteps: StepLike[] = [];
+
+  const buildAssistantPartsFromSteps = (
+    steps: readonly StepLike[],
+  ): {
+    assistantParts: Array<Record<string, unknown>>;
+    persistedToolResults: Array<{
+      instanceId: string;
+      chatId: string;
+      callId: string;
+      toolName: string;
+      payload: unknown;
+    }>;
+  } => {
+    const assistantParts: Array<Record<string, unknown>> = [];
+    const persistedToolResults: Array<{
+      instanceId: string;
+      chatId: string;
+      callId: string;
+      toolName: string;
+      payload: unknown;
+    }> = [];
+
+    for (const step of steps) {
+      // Persist reasoning BEFORE tool calls so chainItems order is thinking → acting
+      const stepReasoning =
+        step.reasoningText ??
+        (step.reasoning?.length
+          ? step.reasoning
+              .map((r) => (r as { text?: string }).text ?? "")
+              .filter(Boolean)
+              .join("\n")
+          : "");
+      if (stepReasoning) {
+        const restoredReasoning = stripResidualTokens(
+          piiVault ? piiVault.restore(stepReasoning) : stepReasoning,
+        );
+        const gloss = extractReasoningGloss(restoredReasoning);
+        assistantParts.push({
+          type: "reasoning" as const,
+          text: restoredReasoning,
+          gloss: gloss ?? undefined,
+          state: "done" as const,
+        } as Record<string, unknown>);
+      }
+
+      // Match results/errors by toolCallId — toolResults excludes tool-error
+      // entries, so parallel index alignment breaks when a tool fails.
+      const resultByCallId = new Map<string, { output?: unknown }>();
+      for (const tr of step.toolResults ?? []) {
+        if (tr.toolCallId) resultByCallId.set(tr.toolCallId, tr);
+      }
+      const errorByCallId = new Map<string, { error?: unknown }>();
+      for (const part of step.content ?? []) {
+        if (part.type === "tool-error" && part.toolCallId) {
+          errorByCallId.set(part.toolCallId, part);
+        }
+      }
+
+      for (const tc of step.toolCalls) {
+        const tid = tc.toolCallId;
+        const rawInput = toPlainRecordSafe(tc.input);
+        const toolErrorPart = errorByCallId.get(tid);
+        const tr = resultByCallId.get(tid);
+        const rawOutput = tr ? toPlainRecordSafe(tr.output) : null;
+
+        const tcInput = piiVault
+          ? ((restoreCache.get(tid) ??
+              piiVault.restoreDeep(rawInput)) as Record<string, unknown>)
+          : rawInput;
+        let tcResult = rawOutput
+          ? piiVault
+            ? ((restoreCache.get(`out:${tid}`) ??
+                piiVault.restoreDeep(rawOutput)) as Record<string, unknown>)
+            : rawOutput
+          : null;
+
+        let errorText: string | null = null;
+        if (isErrorToolOutput(tcResult)) {
+          errorText =
+            typeof tcResult.message === "string" && tcResult.message
+              ? tcResult.message
+              : "Tool failed";
+        } else if (toolErrorPart) {
+          // Thrown path (should not reach here after the no-throw contract):
+          // surface the tool-error content as a terminal output-error.
+          const err = toolErrorPart.error;
+          errorText =
+            err instanceof Error
+              ? err.message
+              : typeof err === "string"
+                ? err
+                : "Tool failed";
+          if (!tcResult) {
+            tcResult = { isError: true, message: errorText };
+          }
+        }
+
+        const isFailed = errorText !== null;
+        assistantParts.push({
+          type: "dynamic-tool" as const,
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          display_name: formatToolDisplayName(tc.toolName),
+          state: tcResult
+            ? isFailed
+              ? "output-error"
+              : "output-available"
+            : "input-available",
+          input: tcInput,
+          output: tcResult ?? {},
+          ...(isFailed ? { errorText } : {}),
+        });
+        if (tcResult !== null && tcResult !== undefined) {
+          persistedToolResults.push({
+            instanceId,
+            chatId,
+            callId: tc.toolCallId,
+            toolName: tc.toolName,
+            payload: toPlainRecordSafe(tcResult),
+          });
+        }
+      }
+
+      const stepText = stripToolResultEchoes(step.text);
+      if (stepText) {
+        const restoredText = stripResidualTokens(
+          piiVault ? piiVault.restore(stepText) : stepText,
+        );
+        assistantParts.push({ type: "text" as const, text: restoredText });
+      }
+    }
+
+    return { assistantParts, persistedToolResults };
+  };
+
+  const persistToolResultRows = async (
+    rows: Array<{
+      instanceId: string;
+      chatId: string;
+      callId: string;
+      toolName: string;
+      payload: unknown;
+    }>,
+  ): Promise<void> => {
+    if (rows.length === 0) return;
+    await db.toolResult
+      .createMany({
+        data: rows.map((r) => ({
+          instanceId: r.instanceId,
+          chatId: r.chatId,
+          callId: r.callId,
+          toolName: r.toolName,
+          payload: toPrismaJson(r.payload),
+        })),
+        skipDuplicates: true,
+      })
+      .catch((err: unknown) =>
+        console.error("[agent/tool-result] persistence failed:", err),
+      );
+  };
+
+  const checkpointPartialContent = async (): Promise<void> => {
+    if (completedSteps.length === 0) return;
+    try {
+      const { assistantParts, persistedToolResults } =
+        buildAssistantPartsFromSteps(completedSteps);
+      await db.message.update({
+        where: { id: assistantMessageRow.id },
+        data: { content: toPrismaJson(assistantParts) },
+      });
+      await persistToolResultRows(persistedToolResults);
+    } catch (err) {
+      console.error("[agent/checkpoint] partial persist failed:", err);
+    }
+  };
+
   const agent = new ToolLoopAgent({
     model,
     instructions: {
@@ -923,6 +1136,7 @@ export async function prepareAgentRun(
     }),
     // Per-step truncation signal: we set no output ceiling, so any `length`
     // finish comes from the provider side — log it with run context.
+    // Also checkpoint content so an abort after this step keeps partial output.
     onStepFinish: async (event) => {
       const reason = (event as { finishReason?: unknown }).finishReason;
       if (reason === "length") {
@@ -933,6 +1147,8 @@ export async function prepareAgentRun(
           model: chat.model,
         });
       }
+      completedSteps.push(event as unknown as StepLike);
+      await checkpointPartialContent();
     },
     onFinish: async (result) => {
       // The run reached a terminal state — stop the heartbeat so the Redis
@@ -967,96 +1183,14 @@ export async function prepareAgentRun(
         const cacheWriteTokens =
           totalUsage.inputTokenDetails?.cacheWriteTokens ?? 0;
 
-        // Build assistant content from steps (UIMessage parts format)
-        const assistantParts: Array<Record<string, unknown>> = [];
-
-        // §4.1 — full tool-result persistence, keyed by tool-call id, written
-        // once per run. This is what makes every §4 reduction addressable.
-        const persistedToolResults: Array<{
-          instanceId: string;
-          chatId: string;
-          callId: string;
-          toolName: string;
-          payload: unknown;
-        }> = [];
-
-        for (const step of steps) {
-          // Persist reasoning BEFORE tool calls so chainItems order is thinking → acting
-          const stepReasoning =
-            step.reasoningText ??
-            (step.reasoning?.length
-              ? step.reasoning
-                  .map((r) => (r as { text?: string }).text ?? "")
-                  .filter(Boolean)
-                  .join("\n")
-              : "");
-          if (stepReasoning) {
-            const restoredReasoning = stripResidualTokens(
-              piiVault ? piiVault.restore(stepReasoning) : stepReasoning,
-            );
-            const gloss = extractReasoningGloss(restoredReasoning);
-            assistantParts.push({
-              type: "reasoning" as const,
-              text: restoredReasoning,
-              gloss: gloss ?? undefined,
-              state: "done" as const,
-            } as Record<string, unknown>);
-          }
-
-          for (let i = 0; i < step.toolCalls.length; i++) {
-            const tc = step.toolCalls[i]!;
-            const tr = step.toolResults[i];
-            const rawInput = toPlainRecordSafe(tc.input);
-            const rawOutput = tr ? toPlainRecordSafe(tr.output) : null;
-            const tid = tc.toolCallId;
-
-            // Use the CACHED restored value (set once by wrapToolExecutors during
-            // execution) so DB persistence stores the exact same value the tool saw,
-            // without a second restoreDeep() per tool call. Falls back to restoring
-            // now if the cache misses (e.g. tool executed outside the wrapper).
-            const tcInput = piiVault
-              ? ((restoreCache.get(tid) ??
-                  piiVault.restoreDeep(rawInput)) as Record<string, unknown>)
-              : rawInput;
-            const tcResult = rawOutput
-              ? piiVault
-                ? ((restoreCache.get(`out:${tid}`) ??
-                    piiVault.restoreDeep(rawOutput)) as Record<string, unknown>)
-                : rawOutput
-              : null;
-
-            assistantParts.push({
-              type: "dynamic-tool" as const,
-              toolCallId: tc.toolCallId,
-              toolName: tc.toolName,
-              display_name: formatToolDisplayName(tc.toolName),
-              state: tcResult ? "output-available" : "input-available",
-              input: tcInput,
-              output: tcResult ?? {},
-            });
-            if (tcResult !== null && tcResult !== undefined) {
-              persistedToolResults.push({
-                instanceId,
-                chatId,
-                callId: tc.toolCallId,
-                toolName: tc.toolName,
-                payload: toPlainRecordSafe(tcResult),
-              });
-            }
-          }
-
-          const stepText = stripToolResultEchoes(step.text);
-          if (stepText) {
-            // Restore PII tokens back to original values before persisting.
-            // The database stores real data; only the LLM saw redacted tokens.
-            // Strip any residual (orphan) token restore() cannot resolve so
-            // the transcript never stores a raw placeholder that would re-leak.
-            const restoredText = stripResidualTokens(
-              piiVault ? piiVault.restore(stepText) : stepText,
-            );
-            assistantParts.push({ type: "text" as const, text: restoredText });
-          }
-        }
+        // Build assistant content from steps (UIMessage parts format).
+        // Prefer full result.steps; fall back to onStepFinish checkpoints.
+        const sourceSteps =
+          steps.length > 0
+            ? (steps as unknown as StepLike[])
+            : completedSteps;
+        const { assistantParts, persistedToolResults } =
+          buildAssistantPartsFromSteps(sourceSteps);
 
         // Append truncation notice for Ollama models when the response
         // was cut off by the maxTokens limit.
@@ -1070,22 +1204,7 @@ export async function prepareAgentRun(
         // §4.1 — persist full results before the message update. Non-fatal: a
         // failed write just means that run's results are unreachable by
         // read_tool_result (history still carries the in-context copies).
-        if (persistedToolResults.length > 0) {
-          await db.toolResult
-            .createMany({
-              data: persistedToolResults.map((r) => ({
-                instanceId: r.instanceId,
-                chatId: r.chatId,
-                callId: r.callId,
-                toolName: r.toolName,
-                payload: toPrismaJson(r.payload),
-              })),
-              skipDuplicates: true,
-            })
-            .catch((err: unknown) =>
-              console.error("[agent/tool-result] persistence failed:", err),
-            );
-        }
+        await persistToolResultRows(persistedToolResults);
 
         // Skill state persistence (Phase 6): in-band ```skill-state <slug>
         // blocks from stateful skills loaded or pinned this turn. Structured
@@ -1184,21 +1303,46 @@ export async function prepareAgentRun(
         metrics.genMs = Date.now() - metrics.startedAt;
         const finishReasonStr =
           typeof finishReason === "string" ? finishReason : null;
-        await db.message.update({
+        // Never clobber a terminal status already written by an abort path —
+        // partial content from onStepFinish checkpoints is still authoritative.
+        const existingRow = await db.message.findUnique({
           where: { id: assistantMessageRow.id },
-          data: {
-            content: toPrismaJson(assistantParts),
-            inputTokens,
-            outputTokens,
-            cacheReadTokens,
-            cacheWriteTokens,
-            sectionTokens: toPrismaJson(metrics.sectionTokens ?? {}),
-            ttftMs: metrics.ttftMs,
-            genMs: metrics.genMs,
-            finishReason: finishReasonStr,
-            runStatus: finishReasonStr === "error" ? "failed" : "completed",
-          },
+          select: { runStatus: true },
         });
+        if (!existingRow?.runStatus) {
+          await db.message.update({
+            where: { id: assistantMessageRow.id },
+            data: {
+              content: toPrismaJson(assistantParts),
+              inputTokens,
+              outputTokens,
+              cacheReadTokens,
+              cacheWriteTokens,
+              sectionTokens: toPrismaJson(metrics.sectionTokens ?? {}),
+              ttftMs: metrics.ttftMs,
+              genMs: metrics.genMs,
+              finishReason: finishReasonStr,
+              runStatus: finishReasonStr === "error" ? "failed" : "completed",
+            },
+          });
+        } else {
+          // Status already terminal (cancelled/aborted mid-run): still refresh
+          // any content that arrived after the checkpoint, but keep the status.
+          await db.message.update({
+            where: { id: assistantMessageRow.id },
+            data: {
+              content: toPrismaJson(assistantParts),
+              inputTokens,
+              outputTokens,
+              cacheReadTokens,
+              cacheWriteTokens,
+              sectionTokens: toPrismaJson(metrics.sectionTokens ?? {}),
+              ttftMs: metrics.ttftMs,
+              genMs: metrics.genMs,
+              finishReason: finishReasonStr,
+            },
+          });
+        }
 
         // Section 0.1 instrumentation — one line per LLM request. Estimated
         // section splits let each token-efficiency phase be attributed.
@@ -1263,6 +1407,45 @@ export async function prepareAgentRun(
         );
       } catch (error) {
         console.error("[agent/onFinish] post-stream processing failed:", error);
+        // Persist whatever was checkpointed so the row is never a silent
+        // empty bubble, and mark failed only if no terminal status exists yet.
+        try {
+          const { assistantParts } = buildAssistantPartsFromSteps(
+            completedSteps,
+          );
+          const existing = await db.message.findUnique({
+            where: { id: assistantMessageRow.id },
+            select: { runStatus: true },
+          });
+          if (!existing?.runStatus) {
+            await db.message.update({
+              where: { id: assistantMessageRow.id },
+              data: {
+                content: toPrismaJson(
+                  assistantParts.length > 0
+                    ? assistantParts
+                    : [
+                        {
+                          type: "text",
+                          text: "Run failed before any output was saved.",
+                        },
+                      ],
+                ),
+                runStatus: "failed",
+              },
+            });
+          } else if (assistantParts.length > 0) {
+            await db.message.update({
+              where: { id: assistantMessageRow.id },
+              data: { content: toPrismaJson(assistantParts) },
+            });
+          }
+        } catch (persistErr) {
+          console.error(
+            "[agent/onFinish] failed-path persist also failed:",
+            persistErr,
+          );
+        }
       }
     },
   });

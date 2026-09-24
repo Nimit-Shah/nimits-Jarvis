@@ -69,6 +69,11 @@ function mapToToolCallEntry(
     state = "output-error";
   }
 
+  const errorText =
+    part.state === "output-error"
+      ? (part as { errorText?: string }).errorText
+      : undefined;
+
   return {
     tool_name: rawName,
     tool_category: category,
@@ -76,7 +81,9 @@ function mapToToolCallEntry(
     message:
       state === "input-streaming" || state === "input-available"
         ? `Using ${displayName}...`
-        : `Used ${displayName}`,
+        : state === "output-error"
+          ? (errorText ?? `Failed: ${displayName}`)
+          : `Used ${displayName}`,
     inputs: part.input as Record<string, unknown>,
     output:
       part.state === "output-available"

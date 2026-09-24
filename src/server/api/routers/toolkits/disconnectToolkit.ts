@@ -27,26 +27,32 @@ export const disconnectToolkit = protectedProcedure
     const session = await composio.create(instance.id, {});
 
     // Verify the connectionId actually belongs to this instance before deleting.
-    // This prevents a user from passing an arbitrary connectionId belonging to
-    // another user or project. Paginate through results in case the user has
-    // more than 50 connected toolkits (Composio API caps at 50 per page).
-    let isOwned = false;
+    // isConnected: true is essential — without it this paginates the ENTIRE
+    // ~1500-toolkit catalog (31 pages) against a 10-page cap, so connected
+    // toolkits deep in the catalog (e.g. supadata) were never found and the
+    // disconnect threw FORBIDDEN.
+    let matchedSlug: string | undefined;
     let cursor: string | undefined;
 
-    for (let i = 0; i < 10 && !isOwned; i++) {
+    for (let i = 0; i < 10 && !matchedSlug; i++) {
       const page = await session.toolkits({
         limit: 50,
+        isConnected: true,
         ...(cursor ? { cursor } : {}),
       });
-      isOwned = page.items.some(
+      const match = page.items.find(
         (toolkit) =>
           toolkit.connection?.connectedAccount?.id === input.connectionId,
       );
+      if (match) {
+        matchedSlug = match.slug;
+        break;
+      }
       cursor = page.cursor ?? undefined;
       if (!cursor || page.items.length === 0) break;
     }
 
-    if (!isOwned) {
+    if (!matchedSlug) {
       throw new TRPCError({
         code: "FORBIDDEN",
         message:
@@ -54,7 +60,27 @@ export const disconnectToolkit = protectedProcedure
       });
     }
 
-    await composio.connectedAccounts.delete(input.connectionId);
+    // Delete ALL connected accounts for this toolkit slug — a toolkit can
+    // accumulate duplicate ACTIVE accounts (re-connects), and removing only
+    // the one the session surfaces would leave the card stuck "connected".
+    // List is scoped to this project's API key, same as the ownership check.
+    const accounts = await composio.connectedAccounts.list({
+      toolkitSlugs: [matchedSlug],
+      limit: 100,
+    });
+    const toDelete = accounts.items.filter(
+      (account) => account.id === input.connectionId || account.status === "ACTIVE",
+    );
+    for (const account of toDelete) {
+      await composio.connectedAccounts.delete(account.id);
+    }
+    if (toDelete.length === 0) {
+      // Ownership passed but the account vanished between check and delete —
+      // treat as success so the UI can refresh to the true state.
+      console.warn(
+        `[toolkits] disconnect: owned connection ${input.connectionId} not in account list for ${matchedSlug}`,
+      );
+    }
 
     // Invalidate the agent's cached session+tools so the next turn rebuilds
     // without the now-disconnected toolkit.
