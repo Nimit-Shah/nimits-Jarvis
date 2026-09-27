@@ -10,6 +10,16 @@ export const toggleMcpTool = protectedProcedure
     if (!tool) throw new TRPCError({ code: "NOT_FOUND", message: "Tool not found" });
     if (tool.server.instance.userId !== ctx.session.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Not your instance" });
 
+    // Browser tools are never cron-safe: cron runs unattended in a separate
+    // process and must not drive a browser (single-process invariant for the
+    // target mutex). Sync already defaults them false; this closes the UI.
+    if (input.cronSafe === true && tool.server.serverType === "playwright") {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "Browser tools are never cron-safe — cron runs unattended and must not drive a browser.",
+      });
+    }
+
     const data: Record<string, unknown> = {};
     if (input.enabled !== undefined) data.enabled = input.enabled;
     if (input.cronSafe !== undefined) data.cronSafe = input.cronSafe;

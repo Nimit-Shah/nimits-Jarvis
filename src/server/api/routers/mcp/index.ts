@@ -13,6 +13,9 @@ import { addMcpOriginRule } from "./addMcpOriginRule";
 import { toggleMcpOriginRule } from "./toggleMcpOriginRule";
 import { deleteMcpOriginRule } from "./deleteMcpOriginRule";
 import { listSeedCandidates } from "./listSeedCandidates";
+import { listBrowserRows } from "./listBrowserRows";
+import { copyBrowserConfig } from "./copyBrowserConfig";
+import { diffBrowserConfig } from "./diffBrowserConfig";
 
 export const mcpRouter = router({
   addMcpServer,
@@ -29,4 +32,7 @@ export const mcpRouter = router({
   toggleMcpOriginRule,
   deleteMcpOriginRule,
   listSeedCandidates,
+  listBrowserRows,
+  copyBrowserConfig,
+  diffBrowserConfig,
 });

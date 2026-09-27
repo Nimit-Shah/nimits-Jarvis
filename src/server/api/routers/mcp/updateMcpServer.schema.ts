@@ -14,11 +14,18 @@ export const updateMcpServerSchema = z.object({
   userDataDir: z.string().max(300).nullable().optional(),
   cdpEndpoint: z.string().max(200).nullable().optional(),
   cdpConfirmed: z.boolean().optional(),
+  // Typed consent: must equal "ATTACH" verbatim; sets cdpConfirmed.
+  cdpConfirmPhrase: z.string().max(20).optional(),
+  // CDP ceiling — set outside the Browser tab (row overflow menu).
+  cdpAllowed: z.boolean().optional(),
   extensionConfirmed: z.boolean().optional(),
   headless: z.boolean().optional(),
   noSandbox: z.boolean().optional(),
   infraSeedEnabled: z.boolean().optional(),
   infraSeedExcluded: z.array(z.string().max(120)).max(64).optional(),
+  // Dismiss the browser-type proposal banner. Deliberately outside the
+  // policy-keys list: no daemon impact, no version bump.
+  dismissTypeConfirmation: z.boolean().optional(),
 });
 
 export type UpdateMcpServerInput = z.infer<typeof updateMcpServerSchema>;

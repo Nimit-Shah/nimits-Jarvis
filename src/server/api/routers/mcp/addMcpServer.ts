@@ -13,7 +13,7 @@ export const addMcpServer = protectedProcedure
     await getInstanceForUser(ctx.session.user.id, input.instanceId);
 
     try {
-      assertSafeMcpUrl(input.url);
+      assertSafeMcpUrl(input.url, { allowLoopback: true });
     } catch (e) {
       throw new TRPCError({ code: "BAD_REQUEST", message: (e as Error).message });
     }

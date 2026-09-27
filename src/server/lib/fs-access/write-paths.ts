@@ -25,6 +25,10 @@ const WRITE_DENY_SUBPATHS = [
   ".config/fish", ".zsh_sessions",
   // remote access (already denied for read; restated for write clarity)
   ".ssh",
+  // credential stores / client tool configs — overwriting these substitutes
+  // identities or credentials that later local tool invocations trust
+  ".curlrc", ".wgetrc", ".envrc", ".pgpass", ".my.cnf",
+  ".config/op", ".config/sops", ".config/rclone",
   // scheduled execution
   "Library/Preferences/com.apple.loginitems.plist",
   // editor / tooling auto-execution

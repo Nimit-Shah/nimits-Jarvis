@@ -1,6 +1,7 @@
 import { TRPCError } from "@trpc/server";
 import { protectedProcedure } from "~/server/api/trpc";
 import { db } from "~/server/clients/db";
+import { invalidateMcpClient } from "~/server/clients/mcp";
 import { toggleMcpOriginRuleSchema } from "./toggleMcpOriginRule.schema";
 
 export const toggleMcpOriginRule = protectedProcedure
@@ -12,5 +13,6 @@ export const toggleMcpOriginRule = protectedProcedure
 
     const updated = await db.mcpOriginRule.update({ where: { id: input.ruleId }, data: { enabled: input.enabled } });
     await db.mcpServer.update({ where: { id: rule.mcpServerId }, data: { policyVersion: { increment: 1 } } });
+    invalidateMcpClient(rule.mcpServerId);
     return updated;
   });

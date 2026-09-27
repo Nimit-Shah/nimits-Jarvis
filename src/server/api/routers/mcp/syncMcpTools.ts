@@ -13,6 +13,19 @@ export const syncMcpTools = protectedProcedure
 
     try {
       await syncToolsForServer(input.serverId);
+      // Propose-only browser detection: a generic row exposing the two named
+      // tools is probably a browser server. Never auto-flips serverType —
+      // an automatic flip would spawn an unasked browser child.
+      if (server.serverType === "generic" && !server.needsTypeConfirmation) {
+        const names = new Set(
+          (
+            await db.mcpTool.findMany({ where: { mcpServerId: input.serverId }, select: { originalName: true } })
+          ).map((t) => t.originalName),
+        );
+        if (names.has("browser_navigate") && names.has("browser_snapshot")) {
+          await db.mcpServer.update({ where: { id: input.serverId }, data: { needsTypeConfirmation: true } });
+        }
+      }
       return { ok: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

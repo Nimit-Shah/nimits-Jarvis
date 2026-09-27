@@ -188,6 +188,9 @@ model McpServer {
   lastError    String?
   lastSyncedAt DateTime?
   needsSync    Boolean  @default(false)
+  // Set on sync when a generic row exposes browser tools; propose-only,
+  // never auto-flips serverType. Dismiss clears permanently.
+  needsTypeConfirmation Boolean @default(false)
 
   // Origin policy (browser-type servers; enforced by browser-mcp-daemon).
   serverType           String   @default("generic") // generic | playwright
@@ -204,6 +207,9 @@ model McpServer {
   userDataDir    String? // dedicated profile dir; never a main-browser profile
   cdpEndpoint    String? // http://127.0.0.1:9222; explicit opt-in only
   cdpConfirmed   Boolean @default(false)
+  // CDP ceiling ("have you thought about this" gate, not a denial).
+  // false on creation; the Browser tab never sets it.
+  cdpAllowed     Boolean @default(false)
   // Extension bridge: drives the OPEN Comet/Chrome via the Playwright
   // extension (live profile + logins). Separate flag from CDP — separate
   // surface, separate audit trail. Token lives in env, never here.

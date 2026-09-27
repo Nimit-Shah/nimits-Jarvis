@@ -1,0 +1,1929 @@
+=== PHASES 0-4 REVIEW — uncommitted working tree (HEAD: b6282ad) ===
+
+--- [tracked modifications] git diff ---
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 6c64245..41c1a65 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -188,6 +188,9 @@ model McpServer {
+   lastError    String?
+   lastSyncedAt DateTime?
+   needsSync    Boolean  @default(false)
++  // Set on sync when a generic row exposes browser tools; propose-only,
++  // never auto-flips serverType. Dismiss clears permanently.
++  needsTypeConfirmation Boolean @default(false)
+ 
+   // Origin policy (browser-type servers; enforced by browser-mcp-daemon).
+   serverType           String   @default("generic") // generic | playwright
+@@ -204,6 +207,9 @@ model McpServer {
+   userDataDir    String? // dedicated profile dir; never a main-browser profile
+   cdpEndpoint    String? // http://127.0.0.1:9222; explicit opt-in only
+   cdpConfirmed   Boolean @default(false)
++  // CDP ceiling ("have you thought about this" gate, not a denial).
++  // false on creation; the Browser tab never sets it.
++  cdpAllowed     Boolean @default(false)
+   // Extension bridge: drives the OPEN Comet/Chrome via the Playwright
+   // extension (live profile + logins). Separate flag from CDP — separate
+   // surface, separate audit trail. Token lives in env, never here.
+@@ -259,6 +265,20 @@ model McpOriginRule {
+   @@map("mcp_origin_rule")
+ }
+ 
++// Holder lock for one browser target (shared managed port or CDP endpoint).
++// Cross-process state between the daemon (owner) and Next.js request path
++// (enforcer). Crash-safe: no live heartbeat means free for the taking.
++model BrowserLock {
++  id               String   @id @default(cuid())
++  target           String   @unique // "port:8931" | "cdp:http://127.0.0.1:9222"
++  holderServerId   String
++  holderInstanceId String
++  acquiredAt       DateTime @default(now())
++  lastToolAt       DateTime @updatedAt
++
++  @@map("mcp_browser_lock")
++}
++
+ model Chat {
+   id                    String    @id @default(cuid())
+   instanceId            String
+diff --git a/scripts/browser-mcp-daemon.ts b/scripts/browser-mcp-daemon.ts
+index 02e0707..c50db58 100644
+--- a/scripts/browser-mcp-daemon.ts
++++ b/scripts/browser-mcp-daemon.ts
+@@ -22,6 +22,7 @@ import { connect } from "node:net";
+ import { db } from "~/server/clients/db";
+ import { expandOriginPatterns } from "~/server/lib/browser/origins";
+ import { infraSeedFlat } from "~/server/lib/browser/infra-origins";
++import { lockTargetFor } from "~/server/lib/browser/lock-target";
+ import { validateDedicatedProfileDir } from "~/server/lib/browser/profile-guard";
+ 
+ const POLL_MS = 5_000;
+@@ -37,15 +38,19 @@ const LEGACY_ROOT = join(homedir(), ".jarvis");
+ const LEGACY_MIN_BYTES = 1 * 1024 * 1024;
+ 
+ type Supervised = {
+-  serverId: string;
++  groupKey: string;
++  port: number;
++  ownerId: string;
++  participantIds: string[];
++  policyVersions: Record<string, number>;
++  policyHash: string;
++  lockTarget: string | null;
+   slug: string;
+   child: ChildProcess | null;
+-  policyVersion: number;
+   restarts: number[];
+   stopped: boolean;
+   gaveUp: boolean;
+   startToken: number;
+-  port: number;
+ };
+ 
+ const supervised = new Map<string, Supervised>();
+@@ -147,6 +152,17 @@ type ServerRow = {
+   noSandbox: boolean;
+   infraSeedEnabled: boolean;
+   infraSeedExcluded: string[];
++  policyVersion: number;
++  createdAt: Date;
++};
++
++type RuleRow = { pattern: string; kind: string };
++
++type Group = {
++  key: string;
++  port: number;
++  owner: ServerRow;
++  members: ServerRow[];
+ };
+ 
+ function dirBytes(path: string): number {
+@@ -184,7 +200,9 @@ function legacyProfiles(): Array<{ path: string; reason: string; bytes: number }
+ 
+ function portHolder(port: number): { pid: string; comm: string; args: string } | null {
+   try {
+-    const pid = execSync(`lsof -ti:${port}`, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim().split("\n")[0]?.trim();
++    // LISTEN only: an ESTABLISHED client socket (e.g. Jarvis itself holding
++    // a dead session) must never block or doom supervision.
++    const pid = execSync(`lsof -ti:${port} -sTCP:LISTEN`, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim().split("\n")[0]?.trim();
+     if (!pid) return null;
+     let comm = "";
+     let args = "";
+@@ -243,12 +261,10 @@ async function preflight(servers: ServerRow[]): Promise<string[]> {
+     if (holder && !reapMcpOrphan(holder)) {
+       problems.push(`${s.name}: port ${port} is held by an unrelated process (${holder.pid}${holder.comm ? ` ${holder.comm}` : ""}) — free it or change the server URL.`);
+     }
+-    if (s.originMode === "allowlist") {
+-      const n = await db.mcpOriginRule.count({ where: { mcpServerId: s.id, enabled: true, kind: "allow" } });
+-      if (n === 0) {
+-        problems.push(`${s.name}: allowlist mode is on but no origins are allowed — add at least one site or switch to Open.`);
+-      }
+-    }
++    // NOTE: per-row policy problems (e.g. allowlist mode with zero rules)
++    // are NOT preflight blockers: reconcile marks those rows failed
++    // individually. A single misconfigured row must never silence healthy
++    // rows by refusing the whole daemon.
+   }
+   return problems;
+ }
+@@ -258,8 +274,54 @@ async function preflight(servers: ServerRow[]): Promise<string[]> {
+ // ---------------------------------------------------------------------------
+ 
+ export async function buildArgs(server: ServerRow): Promise<{ args: string[]; spec: Record<string, unknown> } | { error: string }> {
++  const rules = await db.mcpOriginRule.findMany({ where: { mcpServerId: server.id, enabled: true } });
++  return buildGroupArgs(server, [server], new Map([[server.id, rules]]));
++}
++
++function groupKeyFor(server: ServerRow): string | null {
++  if (server.browserMode === "cdp") {
++    if (!server.cdpEndpoint) return null;
++    return `cdp:${server.cdpEndpoint}`;
++  }
+   const port = portFromUrl(server.url);
+-  if (port === null) return { error: `Only loopback URLs are supervised (got ${server.url}).` };
++  if (port === null) return null;
++  const cls = server.browserMode === "extension" ? "ext" : "managed";
++  return `port:${port}:${cls}`;
++}
++
++function groupServers(servers: ServerRow[]): Group[] {
++  const byKey = new Map<string, ServerRow[]>();
++  for (const s of servers) {
++    const key = groupKeyFor(s);
++    if (key === null) continue;
++    const list = byKey.get(key) ?? [];
++    list.push(s);
++    byKey.set(key, list);
++  }
++  const groups: Group[] = [];
++  for (const [key, members] of byKey) {
++    const sorted = [...members].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
++    const owner = sorted[0]!;
++    const port = owner.browserMode === "cdp" ? (portFromUrl(owner.url) ?? 0) : Number(key.split(":")[1]);
++    groups.push({ key, port, owner, members: sorted });
++  }
++  return groups;
++}
++
++function policyHashFor(members: ServerRow[]): string {
++  return members
++    .map((m) => `${m.id}:${m.policyVersion}`)
++    .sort()
++    .join("|");
++}
++
++export async function buildGroupArgs(
++  owner: ServerRow,
++  members: ServerRow[],
++  rulesByServer: Map<string, RuleRow[]>,
++): Promise<{ args: string[]; spec: Record<string, unknown> } | { error: string }> {
++  const port = portFromUrl(owner.url);
++  if (port === null) return { error: `Only loopback URLs are supervised (got ${owner.url}).` };
+ 
+   const args = ["--port", String(port), "--timeout-navigation", "60000"];
+   // Vision capability: screenshot/file tools return inline image blocks.
+@@ -267,20 +329,27 @@ export async function buildArgs(server: ServerRow): Promise<{ args: string[]; sp
+   // models can analyze them; without this flag only server-side paths come
+   // back and the model stays blind.
+   args.push("--caps", "vision");
+-  // No --no-sandbox by default: it exists for Docker/root, not for a
+-  // normal-user Mac driving a logged-in browser. Explicit opt-in only.
+-  if (server.noSandbox) args.push("--no-sandbox");
++  // Sandbox: strictest wins across managed members. A shared child cannot
++  // be sandboxed for one participant and not another. Overridden = rows
++  // that wanted it off but lost the vote.
++  const managed = members.filter((m) => m.browserMode !== "cdp" && m.browserMode !== "extension");
++  const sandboxOffEverywhere = managed.length > 0 && managed.every((m) => m.noSandbox);
++  if (sandboxOffEverywhere) args.push("--no-sandbox");
++  const sandboxOverridden = sandboxOffEverywhere ? [] : managed.filter((m) => m.noSandbox).map((m) => m.id);
+   // No --headless for attached modes (cdp/extension): there is no launched
+   // browser to head.
+-  if (server.headless && server.browserMode !== "cdp" && server.browserMode !== "extension") args.push("--headless");
+-  if (server.browserMode === "channel") args.push("--browser", server.browserChannel ?? "chrome");
+-  else if (server.browserMode === "executable") {
+-    if (!server.executablePath) return { error: "browserMode executable needs executablePath." };
+-    args.push("--executable-path", server.executablePath);
+-  } else if (server.browserMode === "cdp") {
+-    if (!server.cdpEndpoint || !server.cdpConfirmed) return { error: "CDP needs cdpEndpoint + explicit confirmation." };
+-    args.push("--cdp-endpoint", server.cdpEndpoint);
+-  } else if (server.browserMode === "extension") {
++  if (owner.headless && owner.browserMode !== "cdp" && owner.browserMode !== "extension") args.push("--headless");
++  if (owner.browserMode === "channel") args.push("--browser", owner.browserChannel ?? "chrome");
++  else if (owner.browserMode === "executable") {
++    if (!owner.executablePath) return { error: `browserMode executable needs executablePath (${owner.name}).` };
++    args.push("--executable-path", owner.executablePath);
++  } else if (owner.browserMode === "cdp") {
++    if (!owner.cdpEndpoint) return { error: `CDP needs cdpEndpoint (${owner.name}).` };
++    if (!members.some((m) => m.cdpConfirmed)) {
++      return { error: `CDP needs explicit confirmation on at least one row sharing ${owner.cdpEndpoint}.` };
++    }
++    args.push("--cdp-endpoint", owner.cdpEndpoint);
++  } else if (owner.browserMode === "extension") {
+     // Extension bridge: drives the OPEN Comet/Chrome (live profile + logins)
+     // via the Playwright extension. Token comes from env
+     // (PLAYWRIGHT_MCP_EXTENSION_TOKEN) — never args, never the spec record.
+@@ -288,19 +357,21 @@ export async function buildArgs(server: ServerRow): Promise<{ args: string[]; sp
+     if (!process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN) {
+       return { error: "Extension mode needs PLAYWRIGHT_MCP_EXTENSION_TOKEN in the daemon environment (.env) — see .env.example." };
+     }
+-    if (!server.extensionConfirmed) return { error: "Extension mode needs explicit confirmation (live browser with your logins)." };
++    if (!members.some((m) => m.extensionConfirmed)) {
++      return { error: "Extension mode needs explicit confirmation on at least one participating row (live browser with your logins)." };
++    }
+     // The relay locates the extension in the DEFAULT profile dir of the
+     // resolved browser (Chrome's tree unless told otherwise). Comet users
+     // must set executablePath to the Comet binary so it looks in Comet's
+     // tree instead — otherwise "Extension not found" (verified live).
+-    if (server.executablePath) args.push("--executable-path", server.executablePath);
++    if (owner.executablePath) args.push("--executable-path", owner.executablePath);
+     args.push("--extension");
+   } else {
+     args.push("--browser", "chrome");
+   }
+ 
+-  if (server.browserMode !== "cdp" && server.browserMode !== "extension") {
+-    const dir = server.userDataDir ?? defaultProfileDir(server.name);
++  if (owner.browserMode !== "cdp" && owner.browserMode !== "extension") {
++    const dir = owner.userDataDir ?? defaultProfileDir(owner.name);
+     const check = validateDedicatedProfileDir(dir);
+     if (!check.ok) return { error: check.message };
+     mkdirSync(check.real, { recursive: true });
+@@ -309,31 +380,43 @@ export async function buildArgs(server: ServerRow): Promise<{ args: string[]; sp
+ 
+   const allowed: string[] = [];
+   const blocked: string[] = [];
+-  if (server.originMode === "allowlist") {
+-    const rules = await db.mcpOriginRule.findMany({ where: { mcpServerId: server.id, enabled: true } });
+-    // Layer 1 — shared infrastructure seed (asset CDNs only; never
+-    // analytics/ads). Not rows: versions with the repo, disabled via
+-    // infraSeedExcluded. Duplicates with Layer 2 are harmless.
+-    const seed = server.infraSeedEnabled ? infraSeedFlat().filter((s) => !server.infraSeedExcluded.includes(s)) : [];
+-    for (const entry of seed) {
++  const allowlistMembers = members.filter((m) => m.originMode === "allowlist");
++  if (allowlistMembers.length > 0) {
++    // Layer 1 — seed union: an entry applies unless every allowlist member
++    // excluded it. Layer 2 — per-site rules unioned across members.
++    // Deny wins globally: a shared child cannot honour a block for one
++    // participant and not another.
++    const seedVotes = new Map<string, number>();
++    for (const m of allowlistMembers) {
++      if (!m.infraSeedEnabled) continue;
++      for (const entry of infraSeedFlat()) {
++        if (m.infraSeedExcluded.includes(entry)) continue;
++        seedVotes.set(entry, (seedVotes.get(entry) ?? 0) + 1);
++      }
++    }
++    for (const entry of seedVotes.keys()) {
+       try {
+         allowed.push(...expandOriginPatterns(entry));
+       } catch {
+         console.warn(`[browser-daemon] skipping invalid seed entry: ${entry}`);
+       }
+     }
+-    // Layer 2 — per-site rules, unchanged.
+-    for (const r of rules) {
+-      try {
+-        const expanded = expandOriginPatterns(r.pattern);
+-        (r.kind === "block" ? blocked : allowed).push(...expanded);
+-      } catch {
+-        console.warn(`[browser-daemon] skipping invalid rule pattern: ${r.pattern}`);
++    for (const m of allowlistMembers) {
++      for (const r of rulesByServer.get(m.id) ?? []) {
++        try {
++          const expanded = expandOriginPatterns(r.pattern);
++          (r.kind === "block" ? blocked : allowed).push(...expanded);
++        } catch {
++          console.warn(`[browser-daemon] skipping invalid rule pattern: ${r.pattern}`);
++        }
+       }
+     }
+     // Fail closed on SITE rules only: the seed is infrastructure, not
+     // permission to browse — it must never satisfy this check.
+-    const siteAllows = rules.filter((r) => r.kind === "allow").length;
++    const siteAllows = allowlistMembers.reduce(
++      (n, m) => n + (rulesByServer.get(m.id) ?? []).filter((r) => r.kind === "allow").length,
++      0,
++    );
+     if (siteAllows === 0) {
+       return { error: "Allowlist mode is on but no origins are allowed — add at least one site or switch to Open." };
+     }
+@@ -344,10 +427,11 @@ export async function buildArgs(server: ServerRow): Promise<{ args: string[]; sp
+       note: "Launch RECORD — CLI is authoritative; editing this file changes nothing.",
+       command: `node ${mcpCliEntry()} ${args.join(" ")}`,
+       port,
+-      originMode: server.originMode,
++      ownerServerId: owner.id,
++      participantServerIds: members.map((m) => m.id),
++      sandboxOverridden,
+       allowed: sets.allowed,
+       blocked: sets.blocked,
+-      browserMode: server.browserMode,
+       generatedAt: new Date().toISOString(),
+     };
+     return { args, spec };
+@@ -358,10 +442,11 @@ export async function buildArgs(server: ServerRow): Promise<{ args: string[]; sp
+     note: "Launch RECORD — CLI is authoritative; editing this file changes nothing.",
+     command: `node ${cliJs} ${args.join(" ")}`,
+     port,
+-    originMode: server.originMode,
++    ownerServerId: owner.id,
++    participantServerIds: members.map((m) => m.id),
++    sandboxOverridden,
+     allowed,
+     blocked,
+-    browserMode: server.browserMode,
+     generatedAt: new Date().toISOString(),
+   };
+   return { args, spec };
+@@ -381,7 +466,12 @@ function startChild(s: Supervised, cliJs: string, args: string[], spec: Record<s
+   const child = spawn(process.execPath, [cliJs, ...args], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+   s.child = child;
+   attachLogging(child, s.slug);
+-  const startToken = (s.policyVersion << 16) | (Date.now() % 65536);
++  // Record the pid in the spec so crash recovery (and operators) know what
++  // this group was running.
++  try {
++    writeFileSync(join(dir, `${s.slug}.json`), JSON.stringify({ ...spec, childPid: child.pid ?? null }, null, 2));
++  } catch { /* best effort */ }
++  const startToken = Date.now() % 2147483647;
+   s.startToken = startToken;
+   child.on("exit", (code) => {
+     if (s.child !== child) return;
+@@ -392,6 +482,16 @@ function startChild(s: Supervised, cliJs: string, args: string[], spec: Record<s
+     if (s.restarts.length > MAX_RESTARTS) {
+       console.error(`[browser-daemon] ${s.slug} crashed ${s.restarts.length}x in 60s — giving up until next policy change.`);
+       s.gaveUp = true;
++      // Surface the give-up on the rows: a crash-looping child (e.g. CDP
++      // endpoint with nothing listening) must read as failed, never as ok.
++      // No fallback is ever launched — the error names the cause instead.
++      void (async () => {
++        for (const pid of s.participantIds) {
++          await db.mcpServer
++            .update({ where: { id: pid }, data: { status: "failed", lastError: `Supervised browser keeps crashing — see ${logPath(s.slug)}` } })
++            .catch(() => undefined);
++        }
++      })();
+       return;
+     }
+     console.log(`[browser-daemon] ${s.slug} exited (${code}) — restarting in ${CRASH_BACKOFF_MS}ms.`);
+@@ -405,10 +505,15 @@ function startChild(s: Supervised, cliJs: string, args: string[], spec: Record<s
+       if (s.stopped || s.child !== child || child.exitCode !== null || s.startToken !== startToken) return;
+       const free = await isPortFree(port);
+       if (!free) {
+-        await db.mcpServer.update({
+-          where: { id: s.serverId },
+-          data: { appliedPolicyVersion: s.policyVersion, status: "ok", lastError: null },
+-        });
++        // appliedPolicyVersion is per-row: set each participant to its own
++        // policy version so every row's Applying badge clears.
++        for (const pid of s.participantIds) {
++          const want = s.policyVersions[pid];
++          if (want === undefined) continue;
++          await db.mcpServer
++            .update({ where: { id: pid }, data: { appliedPolicyVersion: want, status: "ok", lastError: null } })
++            .catch(() => undefined);
++        }
+       }
+     })().catch((err) => console.error("[browser-daemon] health confirm failed", err));
+   }, HEALTHY_AFTER_MS);
+@@ -468,60 +573,127 @@ async function reconcile(): Promise<void> {
+   const servers = await db.mcpServer.findMany({ where: { serverType: "playwright", enabled: true } });
+   const seen = new Set<string>();
+ 
+-  for (const server of servers) {
+-    seen.add(server.id);
+-    const existing = supervised.get(server.id);
+-    if (existing && existing.policyVersion === server.policyVersion) {
++  // Rows the daemon cannot supervise fail individually with an actionable
++  // message; everything else is grouped by browser target below.
++  const supervisable = servers.filter((s) => {
++    if (s.browserMode === "cdp" && !s.cdpEndpoint) {
++      void db.mcpServer
++        .update({ where: { id: s.id }, data: { status: "failed", lastError: "CDP mode needs a cdpEndpoint." } })
++        .catch(() => undefined);
++      return false;
++    }
++    if (portFromUrl(s.url) === null && s.browserMode !== "cdp") {
++      void db.mcpServer
++        .update({ where: { id: s.id }, data: { status: "failed", lastError: `Only loopback URLs are supervised (got ${s.url}).` } })
++        .catch(() => undefined);
++      return false;
++    }
++    return true;
++  });
++  const rules = await db.mcpOriginRule.findMany({
++    where: { mcpServerId: { in: supervisable.map((s) => s.id) }, enabled: true },
++  });
++  const rulesByServer = new Map<string, { pattern: string; kind: string }[]>();
++  for (const r of rules) {
++    const list = rulesByServer.get(r.mcpServerId) ?? [];
++    list.push({ pattern: r.pattern, kind: r.kind });
++    rulesByServer.set(r.mcpServerId, list);
++  }
++
++  const seenKeys = new Set<string>();
++  // One MCP listener per port: groups colliding on a port are refused except
++  // the oldest (by owner createdAt). A CDP row and an extension row cannot
++  // share :8931 — give the second its own port. Refuse with a message, never
++  // crash-loop into EADDRINUSE.
++  const groups = groupServers(supervisable);
++  const byPort = new Map<number, typeof groups>();
++  for (const g of groups) {
++    const list = byPort.get(g.port) ?? [];
++    list.push(g);
++    byPort.set(g.port, list);
++  }
++  const collidingKeys = new Set<string>();
++  for (const [port, list] of byPort) {
++    if (list.length < 2) continue;
++    list.sort((a, b) => a.owner.createdAt.getTime() - b.owner.createdAt.getTime());
++    for (const loser of list.slice(1)) {
++      collidingKeys.add(loser.key);
++      for (const m of loser.members) {
++        await db.mcpServer
++          .update({ where: { id: m.id }, data: { status: "failed", lastError: `Shares MCP port :${port} with ${list[0]!.owner.name} — give this row its own port.` } })
++          .catch(() => undefined);
++      }
++    }
++  }
++  for (const group of groups) {
++    if (collidingKeys.has(group.key)) continue;
++    for (const m of group.members) seen.add(m.id);
++    seenKeys.add(group.key);
++    const hash = policyHashFor(group.members);
++    const existing = supervised.get(group.key);
++    if (existing && existing.policyHash === hash) {
+       if (existing.child) continue;
+       if (existing.gaveUp) continue;
+     }
+ 
+     if (existing) {
+-      console.log(`[browser-daemon] policy v${server.policyVersion} for ${server.name} — restarting (session will reset; logins in the dedicated profile persist).`);
++      console.log(`[browser-daemon] policy change on ${group.key} — restarting (sessions will reset; logins in dedicated profiles persist).`);
+       await stopChild(existing);
+       existing.stopped = false;
+       existing.gaveUp = false;
+     }
+-    const built = await buildArgs(server);
++    const built = await buildGroupArgs(group.owner, group.members, rulesByServer);
+     if ("error" in built) {
+-      console.error(`[browser-daemon] ${server.name}: ${built.error}`);
+-      await db.mcpServer.update({ where: { id: server.id }, data: { status: "failed", lastError: built.error } });
++      console.error(`[browser-daemon] ${group.key}: ${built.error}`);
++      for (const m of group.members) {
++        await db.mcpServer
++          .update({ where: { id: m.id }, data: { status: "failed", lastError: built.error } })
++          .catch(() => undefined);
++      }
+       continue;
+     }
+-    const port = portFromUrl(server.url) ?? 0;
+     const entry: Supervised = existing ?? {
+-      serverId: server.id,
+-      slug: server.name,
++      groupKey: group.key,
++      port: group.port,
++      ownerId: group.owner.id,
++      participantIds: [],
++      policyVersions: {},
++      policyHash: "",
++      lockTarget: null,
++      slug: group.owner.name,
+       child: null,
+-      policyVersion: 0,
+       restarts: [],
+       stopped: false,
+       gaveUp: false,
+       startToken: 0,
+-      port,
+     };
+-    entry.policyVersion = server.policyVersion;
+-    entry.port = port;
+-    supervised.set(server.id, entry);
+-    let free = await waitForPortFree(port, PORT_WAIT_MS);
++    entry.ownerId = group.owner.id;
++    entry.participantIds = group.members.map((m) => m.id);
++    entry.policyVersions = Object.fromEntries(group.members.map((m) => [m.id, m.policyVersion]));
++    entry.policyHash = hash;
++    entry.lockTarget = lockTargetFor(group.owner);
++    entry.port = group.port;
++    entry.slug = group.owner.name;
++    supervised.set(group.key, entry);
++    let free = await waitForPortFree(group.port, PORT_WAIT_MS);
+     if (!free) {
+       // A stale MCP orphan from a crashed daemon wedges the port forever —
+       // reap it once (Playwright MCP processes only, never anything else).
+-      const holder = portHolder(port);
+-      if (holder && reapMcpOrphan(holder)) free = await waitForPortFree(port, PORT_WAIT_MS);
++      const holder = portHolder(group.port);
++      if (holder && reapMcpOrphan(holder)) free = await waitForPortFree(group.port, PORT_WAIT_MS);
+     }
+     if (!free) {
+-      console.error(`[browser-daemon] ${server.name}: port ${port} still busy — will retry on next poll.`);
++      console.error(`[browser-daemon] ${group.key}: port ${group.port} still busy — will retry on next poll.`);
+       continue;
+     }
+-    startChild(entry, mcpCliEntry(), built.args, built.spec, port);
++    startChild(entry, mcpCliEntry(), built.args, built.spec, group.port);
+   }
+ 
+-  for (const [id, s] of supervised) {
+-    if (!seen.has(id)) {
++  for (const [key, s] of supervised) {
++    if (!seenKeys.has(key)) {
+       console.log(`[browser-daemon] ${s.slug} no longer supervised — stopping.`);
+       await stopChild(s);
+-      supervised.delete(id);
++      supervised.delete(key);
+     }
+   }
+ }
+@@ -546,7 +718,15 @@ async function main(): Promise<void> {
+   const shutdown = () => {
+     console.log("[browser-daemon] shutting down.");
+     void (async () => {
+-      for (const s of supervised.values()) await stopChild(s);
++      for (const s of supervised.values()) {
++        await stopChild(s);
++        // Release holder locks for targets we supervised: a lock must never
++        // outlive the process that arbitrated it (heartbeat absence covers
++        // crashes; this covers clean shutdowns).
++        if (s.lockTarget) {
++          await db.browserLock.deleteMany({ where: { target: s.lockTarget } }).catch(() => undefined);
++        }
++      }
+       await db.$disconnect().finally(() => process.exit(0));
+     })();
+   };
+diff --git a/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-browser-tab.tsx b/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-browser-tab.tsx
+index 7908ec9..89c7a09 100644
+--- a/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-browser-tab.tsx
++++ b/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-browser-tab.tsx
+@@ -3,6 +3,7 @@
+ import { Switch } from "~/components/ui/switch";
+ import { Button } from "~/components/ui/button";
+ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~/components/ui/tooltip";
++import { useState } from "react";
+ import { trpc } from "~/clients/trpc";
+ import { McpDomainsTable } from "./mcp-domains-table";
+ import { McpCdnSheet } from "./mcp-cdn-sheet";
+@@ -27,6 +28,8 @@ export function McpBrowserTab({ server, instanceId }: { server: McpServerSummary
+   const utils = trpc.useUtils();
+   const refresh = () => void utils.mcp.listMcpServers.invalidate({ instanceId });
+   const update = trpc.mcp.updateMcpServer.useMutation({ onSuccess: refresh });
++  const [attachPhrase, setAttachPhrase] = useState("");
++  const [copied, setCopied] = useState(false);
+ 
+   return (
+     <div className="space-y-3 p-3">
+@@ -50,8 +53,70 @@ export function McpBrowserTab({ server, instanceId }: { server: McpServerSummary
+           >
+             Live Comet
+           </Button>
++          <Button
++            variant={server.browserMode === "cdp" ? "default" : "outline"}
++            size="sm"
++            className="h-6 text-[11px]"
++            onClick={() => void update.mutateAsync({ serverId: server.id, browserMode: "cdp" })}
++          >
++            Live attach
++          </Button>
+         </div>
+       </div>
++      {server.browserMode === "cdp" && (
++        <div className="space-y-1.5 rounded-md border p-2">
++          <div className="flex items-center gap-2">
++            <span className="text-muted-foreground shrink-0 text-[11px]">CDP endpoint</span>
++            <input
++              defaultValue={server.cdpEndpoint ?? ""}
++              placeholder="http://127.0.0.1:9222"
++              className="h-6 min-w-0 flex-1 rounded-md border px-2 font-mono text-[11px]"
++              onBlur={(e) => {
++                const v = e.target.value.trim();
++                if (v !== (server.cdpEndpoint ?? "")) void update.mutateAsync({ serverId: server.id, cdpEndpoint: v || null });
++              }}
++            />
++          </div>
++          {!server.cdpConfirmed ? (
++            <div className="flex items-center gap-2">
++              <input
++                value={attachPhrase}
++                onChange={(e) => setAttachPhrase(e.target.value)}
++                placeholder='Type ATTACH to confirm live attach'
++                className="h-6 min-w-0 flex-1 rounded-md border px-2 font-mono text-[11px]"
++              />
++              <Button
++                size="sm"
++                className="h-6 shrink-0 text-[11px]"
++                disabled={attachPhrase !== "ATTACH" || update.isPending}
++                onClick={() => {
++                  setAttachPhrase("");
++                  void update.mutateAsync({ serverId: server.id, cdpConfirmPhrase: "ATTACH" });
++                }}
++              >
++                Confirm
++              </Button>
++            </div>
++          ) : (
++            <p className="text-[11px] text-green-600">Live attach confirmed — web chats only, never cron or Telegram.</p>
++          )}
++          <button
++            className="text-muted-foreground text-[11px] hover:underline"
++            onClick={() => {
++              const cmd = `/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9223 --user-data-dir="$HOME/Library/Application Support/NimitsJarvis/browser/cdp-throwaway"`;
++              void navigator.clipboard.writeText(cmd).then(() => {
++                setCopied(true);
++                setTimeout(() => setCopied(false), 2000);
++              });
++            }}
++          >
++            {copied ? "Copied — run in a terminal" : "Copy throwaway-Chromium launch command (:9223)"}
++          </button>
++          {update.data && typeof update.data === "object" && "endpointConflictWarning" in update.data && update.data.endpointConflictWarning ? (
++            <p className="text-[11px] text-amber-600">{String(update.data.endpointConflictWarning)}</p>
++          ) : null}
++        </div>
++      )}
+       {server.browserMode === "extension" && (
+         <div className="space-y-1.5 rounded-md border border-amber-200 bg-amber-50 p-2">
+           <label className="flex items-start gap-2 text-[11px]">
+@@ -95,9 +160,21 @@ export function McpBrowserTab({ server, instanceId }: { server: McpServerSummary
+         />
+         <span className="text-muted-foreground text-[11px]">{server.noSandbox ? "Off" : "On"}</span>
+       </div>
++      {server.sharedPort && server.sharedPort.participants.length > 0 && (
++        <p className="text-muted-foreground text-[11px]">
++          Shared browser on :{server.sharedPort.port} with{" "}
++          {server.sharedPort.participants.map((p) => `${p.instanceName} / ${p.label}`).join(", ")} — one child serves all rows.
++        </p>
++      )}
++      {server.sandboxOverridden && (
++        <p className="text-[11px] text-amber-600">Sandbox kept on: another row on this port requires it (strictest wins).</p>
++      )}
+       <div className="flex items-center gap-2">
+         <span className="text-xs font-medium">Site access</span>
+         <Hint text="Open: no restriction. Allowlist: only listed sites plus shared CDNs." />
++        {server.browserMode === "cdp" && (
++          <span className="text-muted-foreground text-[10px]">Under Live attach, the allowlist covers what Jarvis fetches, not tabs you open yourself.</span>
++        )}
+         <div className="ml-auto flex gap-1">
+           <Button
+             variant={server.originMode === "open" ? "default" : "outline"}
+@@ -138,6 +215,12 @@ export function McpBrowserTab({ server, instanceId }: { server: McpServerSummary
+             excluded={server.infraSeedExcluded}
+           />
+           <McpDomainsTable serverId={server.id} instanceId={instanceId} />
++          {server.siblingBlocks && server.siblingBlocks.length > 0 && (
++            <p className="text-[11px] text-amber-600">
++              Also blocked for you via {[...new Set(server.siblingBlocks.map((b) => b.byLabel))].join(", ")}:{" "}
++              {server.siblingBlocks.map((b) => b.pattern).join(", ")}
++            </p>
++          )}
+         </div>
+       )}
+     </div>
+diff --git a/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-server-row.tsx b/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-server-row.tsx
+index cd78875..f7ee6bb 100644
+--- a/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-server-row.tsx
++++ b/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-server-row.tsx
+@@ -12,6 +12,7 @@ import { McpReachabilityBadge } from "./mcp-reachability-badge";
+ import { McpStatusBadge } from "./mcp-status-badge";
+ import { McpServerToolsTab } from "./mcp-server-tools-tab";
+ import { McpBrowserTab } from "./mcp-browser-tab";
++import { McpCopyConfigDialog } from "./mcp-copy-config-dialog";
+ import type { McpServerSummary } from "./mcp-server-type";
+ 
+ export function McpServerRow({ server, instanceId }: { server: McpServerSummary; instanceId: string }) {
+@@ -21,6 +22,12 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
+   const sync = trpc.mcp.syncMcpTools.useMutation({ onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }) });
+   const test = trpc.mcp.testMcpServer.useMutation({ onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }) });
+   const del = trpc.mcp.deleteMcpServer.useMutation({ onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }) });
++  const setType = trpc.mcp.updateMcpServer.useMutation({
++    onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }),
++  });
++  const release = trpc.mcp.releaseBrowserLock.useMutation({
++    onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }),
++  });
+ 
+   const dimmed = !server.reachableHere;
+   const isPlaywright = server.serverType === "playwright";
+@@ -44,6 +51,26 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
+                   {server.policyApplying && (
+                     <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">Applying…</span>
+                   )}
++                  {server.browserLock && (
++                    <TooltipProvider>
++                      <Tooltip>
++                        <TooltipTrigger asChild>
++                          <span
++                            className={`rounded px-1.5 py-0.5 text-[10px] ${server.browserLock.mine ? "bg-blue-100 text-blue-700" : "bg-amber-100 text-amber-700"}`}
++                          >
++                             {server.browserLock.mine ? `Holding browser · ${server.browserLock.age}` : `Held by ${server.browserLock.holderInstance} · ${server.browserLock.age}`}
++                          </span>
++                        </TooltipTrigger>
++                        <TooltipContent>
++                          <p className="max-w-[260px] text-xs">
++                            {server.browserLock.mine
++                              ? "This project holds the browser. Release it so other projects can use it — no daemon restart needed."
++                              : `Held by ${server.browserLock.holderInstance} / ${server.browserLock.holderLabel}. Your project's next browser call takes it over — unless that project is running one right now, then wait for it to finish.`}
++                          </p>
++                        </TooltipContent>
++                      </Tooltip>
++                    </TooltipProvider>
++                  )}
+                 </span>
+               </TooltipTrigger>
+               {server.lastError && (
+@@ -52,9 +79,18 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
+                 </TooltipContent>
+               )}
+             </Tooltip>
+-          </TooltipProvider>
+-        )}
+-        <span className="text-muted-foreground whitespace-nowrap text-xs">
++            </TooltipProvider>
++          )}
++          {server.browserLock?.mine && (
++            <button
++              onClick={() => void release.mutateAsync({ serverId: server.id })}
++              disabled={release.isPending}
++              className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] hover:bg-accent"
++            >
++              Release
++            </button>
++          )}
++          <span className="text-muted-foreground whitespace-nowrap text-xs">
+           {server.enabledToolCount}/{server.toolCount} tools
+         </span>
+         <Popover>
+@@ -78,6 +114,32 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
+             >
+               {test.isPending ? <Loader2 className="mr-2 size-3 animate-spin" /> : null} Test connection
+             </button>
++            <div className="my-1 border-t" />
++            <p className="px-2 pt-1 text-[10px] text-muted-foreground">Server type</p>
++            {(["generic", "playwright"] as const).map((t) => (
++              <button
++                key={t}
++                onClick={() => void setType.mutateAsync({ serverId: server.id, serverType: t })}
++                disabled={setType.isPending || server.serverType === t}
++                className="flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-60"
++              >
++                {t === "playwright" ? "Browser (Playwright)" : "Generic"}
++                {server.serverType === t && <span className="ml-auto text-[10px] text-muted-foreground">current</span>}
++              </button>
++            ))}
++            {isPlaywright && (
++              <>
++                <div className="my-1 border-t" />
++                <div className="flex items-center rounded-sm px-2 py-1.5 text-xs">
++                  <span className="flex-1">Allow live attach</span>
++                  <Switch
++                    checked={server.cdpAllowed ?? false}
++                    onCheckedChange={(v) => void setType.mutateAsync({ serverId: server.id, cdpAllowed: v })}
++                  />
++                </div>
++                <McpCopyConfigDialog serverId={server.id} instanceId={instanceId} />
++              </>
++            )}
+             <button
+               onClick={() => void del.mutateAsync({ serverId: server.id })}
+               className="text-destructive flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent"
+@@ -88,6 +150,26 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
+         </Popover>
+         <Switch checked={server.enabled} onCheckedChange={(v) => void toggle.mutateAsync({ serverId: server.id, enabled: v })} />
+       </div>
++      {server.needsTypeConfirmation && server.serverType === "generic" && (
++        <div className="mx-3 mb-2 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5">
++          <p className="flex-1 text-[11px]">This looks like a browser server. Set type to Browser (Playwright)?</p>
++          <Button
++            size="sm"
++            className="h-6 text-[11px]"
++            disabled={setType.isPending}
++            onClick={() => void setType.mutateAsync({ serverId: server.id, serverType: "playwright" })}
++          >
++            Confirm
++          </Button>
++          <button
++            onClick={() => void setType.mutateAsync({ serverId: server.id, dismissTypeConfirmation: true })}
++            className="text-muted-foreground text-[11px] hover:underline"
++          >
++            Dismiss
++          </button>
++        </div>
++      )}
++      {setType.error && <p className="text-destructive px-3 pb-2 text-xs">{setType.error.message}</p>}
+       {expanded && (
+         <div className="border-t px-3 pt-2">
+           <Tabs defaultValue="tools">
+diff --git a/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-servers-panel.tsx b/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-servers-panel.tsx
+index 70f4cf7..ba7e8f3 100644
+--- a/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-servers-panel.tsx
++++ b/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-servers-panel.tsx
+@@ -6,7 +6,14 @@ import { AddMcpServerDialog } from "./add-mcp-server-dialog";
+ import { McpServersPanelSkeleton } from "./mcp-servers-panel.skeleton";
+ 
+ export function McpServersPanel({ instanceId }: { instanceId: string }) {
+-  const { data: servers, isLoading } = trpc.mcp.listMcpServers.useQuery({ instanceId });
++  // 5s polling keeps the three status stores coherent: `status` (reachability),
++  // `policyApplying` (policyVersion vs appliedPolicyVersion), and the
++  // project-scoped browser lock chip. Without it, chips go stale after
++  // another project claims/releases the browser.
++  const { data: servers, isLoading } = trpc.mcp.listMcpServers.useQuery(
++    { instanceId },
++    { refetchInterval: 5_000 },
++  );
+ 
+   if (isLoading) return <McpServersPanelSkeleton />;
+ 
+diff --git a/src/server/api/routers/mcp/addMcpOriginRule.ts b/src/server/api/routers/mcp/addMcpOriginRule.ts
+index f43e645..421deb1 100644
+--- a/src/server/api/routers/mcp/addMcpOriginRule.ts
++++ b/src/server/api/routers/mcp/addMcpOriginRule.ts
+@@ -1,6 +1,7 @@
+ import { TRPCError } from "@trpc/server";
+ import { protectedProcedure } from "~/server/api/trpc";
+ import { db } from "~/server/clients/db";
++import { invalidateMcpClient } from "~/server/clients/mcp";
+ import { normalizeOriginPattern } from "~/server/lib/browser/origins";
+ import { addMcpOriginRuleSchema } from "./addMcpOriginRule.schema";
+ 
+@@ -18,5 +19,6 @@ export const addMcpOriginRule = protectedProcedure
+       update: { enabled: true, notes: input.notes },
+     });
+     await db.mcpServer.update({ where: { id: input.serverId }, data: { policyVersion: { increment: 1 } } });
++    invalidateMcpClient(input.serverId);
+     return rule;
+   });
+diff --git a/src/server/api/routers/mcp/deleteMcpOriginRule.ts b/src/server/api/routers/mcp/deleteMcpOriginRule.ts
+index 292571e..71a7bbc 100644
+--- a/src/server/api/routers/mcp/deleteMcpOriginRule.ts
++++ b/src/server/api/routers/mcp/deleteMcpOriginRule.ts
+@@ -1,6 +1,7 @@
+ import { TRPCError } from "@trpc/server";
+ import { protectedProcedure } from "~/server/api/trpc";
+ import { db } from "~/server/clients/db";
++import { invalidateMcpClient } from "~/server/clients/mcp";
+ import { deleteMcpOriginRuleSchema } from "./deleteMcpOriginRule.schema";
+ 
+ export const deleteMcpOriginRule = protectedProcedure
+@@ -12,5 +13,6 @@ export const deleteMcpOriginRule = protectedProcedure
+ 
+     await db.mcpOriginRule.delete({ where: { id: input.ruleId } });
+     await db.mcpServer.update({ where: { id: rule.mcpServerId }, data: { policyVersion: { increment: 1 } } });
++    invalidateMcpClient(rule.mcpServerId);
+     return { ok: true as const };
+   });
+diff --git a/src/server/api/routers/mcp/deleteMcpServer.ts b/src/server/api/routers/mcp/deleteMcpServer.ts
+index 9f4f172..d52d399 100644
+--- a/src/server/api/routers/mcp/deleteMcpServer.ts
++++ b/src/server/api/routers/mcp/deleteMcpServer.ts
+@@ -2,6 +2,8 @@ import { TRPCError } from "@trpc/server";
+ import { protectedProcedure } from "~/server/api/trpc";
+ import { db } from "~/server/clients/db";
+ import { invalidateMcpClient } from "~/server/clients/mcp";
++import { releaseTargetIfHeldBy } from "~/server/lib/browser/lock";
++import { lockTargetFor } from "~/server/lib/browser/lock-target";
+ import { deleteMcpServerSchema } from "./deleteMcpServer.schema";
+ 
+ export const deleteMcpServer = protectedProcedure
+@@ -11,7 +13,19 @@ export const deleteMcpServer = protectedProcedure
+     if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Server not found" });
+     if (existing.instance.userId !== ctx.session.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Not your instance" });
+ 
++    const oldTarget = lockTargetFor(existing);
+     await db.mcpServer.delete({ where: { id: input.serverId } });
+     invalidateMcpClient(input.serverId);
++    // A deleted row must not orphan its target lease: release it when no
++    // sibling row of this project still maps to that target. Another
++    // project's lease on the same target is untouched.
++    if (oldTarget) {
++      const siblings = await db.mcpServer.findMany({
++        where: { instanceId: existing.instanceId },
++        select: { browserMode: true, url: true, cdpEndpoint: true },
++      });
++      const stillUsed = siblings.some((s) => lockTargetFor(s) === oldTarget);
++      if (!stillUsed) await releaseTargetIfHeldBy(oldTarget, existing.instanceId);
++    }
+     return { ok: true };
+   });
+diff --git a/src/server/api/routers/mcp/index.ts b/src/server/api/routers/mcp/index.ts
+index 8484c5f..d473024 100644
+--- a/src/server/api/routers/mcp/index.ts
++++ b/src/server/api/routers/mcp/index.ts
+@@ -13,6 +13,10 @@ import { addMcpOriginRule } from "./addMcpOriginRule";
+ import { toggleMcpOriginRule } from "./toggleMcpOriginRule";
+ import { deleteMcpOriginRule } from "./deleteMcpOriginRule";
+ import { listSeedCandidates } from "./listSeedCandidates";
++import { listBrowserRows } from "./listBrowserRows";
++import { copyBrowserConfig } from "./copyBrowserConfig";
++import { diffBrowserConfig } from "./diffBrowserConfig";
++import { releaseBrowserLock } from "./releaseBrowserLock";
+ 
+ export const mcpRouter = router({
+   addMcpServer,
+@@ -29,4 +33,8 @@ export const mcpRouter = router({
+   toggleMcpOriginRule,
+   deleteMcpOriginRule,
+   listSeedCandidates,
++  listBrowserRows,
++  copyBrowserConfig,
++  diffBrowserConfig,
++  releaseBrowserLock,
+ });
+diff --git a/src/server/api/routers/mcp/listMcpServers.ts b/src/server/api/routers/mcp/listMcpServers.ts
+index 557b262..22610cb 100644
+--- a/src/server/api/routers/mcp/listMcpServers.ts
++++ b/src/server/api/routers/mcp/listMcpServers.ts
+@@ -2,6 +2,7 @@ import { protectedProcedure } from "~/server/api/trpc";
+ import { db } from "~/server/clients/db";
+ import { getInstanceForUser } from "~/server/api/routers/nimits-jarvis/utils";
+ import { classifyReachability, isReachableHere } from "~/lib/mcp-url";
++import { lockTargetFor, describeLockAge } from "~/server/lib/browser/lock-target";
+ import { listMcpServersSchema } from "./listMcpServers.schema";
+ 
+ export const listMcpServers = protectedProcedure
+@@ -29,8 +30,81 @@ export const listMcpServers = protectedProcedure
+     const countMap = new Map(toolsCounts.map((c) => [c.mcpServerId, c._count.id]));
+     const enabledMap = new Map(enabledCounts.map((c) => [c.mcpServerId, c._count.id]));
+ 
++    // Cross-row sharing context (playwright rows, same user, same port):
++    // sandbox agreement, sibling block hints, and holder-lock chips.
++    const siblings = await db.mcpServer.findMany({
++      where: { serverType: "playwright", instance: { userId: ctx.session.user.id } },
++      select: {
++        id: true,
++        label: true,
++        url: true,
++        browserMode: true,
++        cdpEndpoint: true,
++        noSandbox: true,
++        instanceId: true,
++        instance: { select: { name: true } },
++      },
++    });
++    const siblingRules = await db.mcpOriginRule.findMany({
++      where: { mcpServerId: { in: siblings.map((s) => s.id) }, enabled: true, kind: "block" },
++      select: { mcpServerId: true, pattern: true },
++    });
++    const blocksByServer = new Map<string, string[]>();
++    for (const r of siblingRules) {
++      const list = blocksByServer.get(r.mcpServerId) ?? [];
++      list.push(r.pattern);
++      blocksByServer.set(r.mcpServerId, list);
++    }
++    const portOf = (url: string): number | null => {
++      try {
++        const p = Number(new URL(url).port);
++        return Number.isInteger(p) && p > 0 ? p : null;
++      } catch {
++        return null;
++      }
++    };
++    const lockTargets = [...new Set(siblings.flatMap((s) => {
++      const t = lockTargetFor({ browserMode: s.browserMode, url: s.url, cdpEndpoint: s.cdpEndpoint });
++      return t ? [t] : [];
++    }))];
++    type LockRow = { target: string; holderServerId: string; holderInstanceId: string; acquiredAt: Date; lastToolAt: Date };
++    const locks: LockRow[] = lockTargets.length > 0
++      ? await db.browserLock.findMany({
++        where: { target: { in: lockTargets } },
++        select: { target: true, holderServerId: true, holderInstanceId: true, acquiredAt: true, lastToolAt: true },
++      }).catch((): LockRow[] => [])
++      : [];
++    // Re-fetch holders with labels (small N; clarity over query golf).
++    // Ownership is project-scoped: `mine` compares instances, and the holder
++    // is resolved via its instance (the row is only used for a nicer label).
++    const instanceNameById = new Map(siblings.map((s) => [s.instanceId, s.instance.name]));
++    const lockInfo = new Map<string, { holderInstanceId: string; holderLabel: string; holderInstance: string; age: string }>();
++    for (const l of locks) {
++      const holderRow = siblings.find((s) => s.id === l.holderServerId);
++      lockInfo.set(l.target, {
++        holderInstanceId: l.holderInstanceId,
++        holderLabel: holderRow?.label ?? "browser",
++        holderInstance: holderRow?.instance.name ?? instanceNameById.get(l.holderInstanceId) ?? "another project",
++        age: describeLockAge(l.acquiredAt, l.lastToolAt),
++      });
++    }
++
+     return servers.map((s) => {
+       const reachability = classifyReachability(s.url);
++      const myPort = portOf(s.url);
++      const peers = s.serverType === "playwright" && myPort !== null
++        ? siblings.filter((p) => p.id !== s.id && portOf(p.url) === myPort)
++        : [];
++      const myTarget = s.serverType === "playwright"
++        ? lockTargetFor({ browserMode: s.browserMode, url: s.url, cdpEndpoint: s.cdpEndpoint })
++        : null;
++      const lock = myTarget ? lockInfo.get(myTarget) ?? null : null;
++      const isManagedMode = (mode: string) => mode !== "cdp" && mode !== "extension";
++      const managedNoSandbox: boolean[] = isManagedMode(s.browserMode) ? [s.noSandbox] : [];
++      for (const p of peers) if (isManagedMode(p.browserMode)) managedNoSandbox.push(p.noSandbox);
++      // Strictest wins on a shared child: sandbox stays on unless EVERY
++      // managed participant opted out.
++      const sandboxEffectiveOff = managedNoSandbox.length > 0 && managedNoSandbox.every(Boolean);
+       return {
+         id: s.id,
+         name: s.name,
+@@ -41,6 +115,7 @@ export const listMcpServers = protectedProcedure
+         lastError: s.lastError,
+         lastSyncedAt: s.lastSyncedAt,
+         needsSync: s.needsSync,
++        needsTypeConfirmation: s.needsTypeConfirmation,
+         hasHeaders: s.headersEnc !== null,
+         reachability,
+         reachableHere: isReachableHere(reachability),
+@@ -58,10 +133,26 @@ export const listMcpServers = protectedProcedure
+         cdpEndpoint: s.cdpEndpoint,
+         cdpConfirmed: s.cdpConfirmed,
+         extensionConfirmed: s.extensionConfirmed,
++        cdpAllowed: s.cdpAllowed,
+         headless: s.headless,
+         noSandbox: s.noSandbox,
+         infraSeedEnabled: s.infraSeedEnabled,
+         infraSeedExcluded: s.infraSeedExcluded,
++        browserLock: lock
++          ? { ...lock, mine: lock.holderInstanceId === s.instanceId }
++          : null,
++        sharedPort:
++          peers.length > 0
++            ? {
++              port: myPort,
++              participants: peers.map((p) => ({ label: p.label, instanceName: p.instance.name })),
++            }
++            : null,
++        sandboxOverridden:
++          isManagedMode(s.browserMode) && s.noSandbox && !sandboxEffectiveOff && managedNoSandbox.length > 1,
++        siblingBlocks: peers.flatMap((p) =>
++          (blocksByServer.get(p.id) ?? []).map((pattern) => ({ pattern, byLabel: p.label })),
++        ),
+         createdAt: s.createdAt,
+         updatedAt: s.updatedAt,
+       };
+diff --git a/src/server/api/routers/mcp/syncMcpTools.ts b/src/server/api/routers/mcp/syncMcpTools.ts
+index 5e8a380..98e2962 100644
+--- a/src/server/api/routers/mcp/syncMcpTools.ts
++++ b/src/server/api/routers/mcp/syncMcpTools.ts
+@@ -13,6 +13,19 @@ export const syncMcpTools = protectedProcedure
+ 
+     try {
+       await syncToolsForServer(input.serverId);
++      // Propose-only browser detection: a generic row exposing the two named
++      // tools is probably a browser server. Never auto-flips serverType —
++      // an automatic flip would spawn an unasked browser child.
++      if (server.serverType === "generic" && !server.needsTypeConfirmation) {
++        const names = new Set(
++          (
++            await db.mcpTool.findMany({ where: { mcpServerId: input.serverId }, select: { originalName: true } })
++          ).map((t) => t.originalName),
++        );
++        if (names.has("browser_navigate") && names.has("browser_snapshot")) {
++          await db.mcpServer.update({ where: { id: input.serverId }, data: { needsTypeConfirmation: true } });
++        }
++      }
+       return { ok: true };
+     } catch (err) {
+       const msg = err instanceof Error ? err.message : String(err);
+diff --git a/src/server/api/routers/mcp/toggleMcpOriginRule.ts b/src/server/api/routers/mcp/toggleMcpOriginRule.ts
+index 1123563..d1a67ca 100644
+--- a/src/server/api/routers/mcp/toggleMcpOriginRule.ts
++++ b/src/server/api/routers/mcp/toggleMcpOriginRule.ts
+@@ -1,6 +1,7 @@
+ import { TRPCError } from "@trpc/server";
+ import { protectedProcedure } from "~/server/api/trpc";
+ import { db } from "~/server/clients/db";
++import { invalidateMcpClient } from "~/server/clients/mcp";
+ import { toggleMcpOriginRuleSchema } from "./toggleMcpOriginRule.schema";
+ 
+ export const toggleMcpOriginRule = protectedProcedure
+@@ -12,5 +13,6 @@ export const toggleMcpOriginRule = protectedProcedure
+ 
+     const updated = await db.mcpOriginRule.update({ where: { id: input.ruleId }, data: { enabled: input.enabled } });
+     await db.mcpServer.update({ where: { id: rule.mcpServerId }, data: { policyVersion: { increment: 1 } } });
++    invalidateMcpClient(rule.mcpServerId);
+     return updated;
+   });
+diff --git a/src/server/api/routers/mcp/toggleMcpServer.ts b/src/server/api/routers/mcp/toggleMcpServer.ts
+index a3c0b58..352b0b6 100644
+--- a/src/server/api/routers/mcp/toggleMcpServer.ts
++++ b/src/server/api/routers/mcp/toggleMcpServer.ts
+@@ -1,6 +1,8 @@
+ import { TRPCError } from "@trpc/server";
+ import { protectedProcedure } from "~/server/api/trpc";
+ import { db } from "~/server/clients/db";
++import { invalidateMcpClient } from "~/server/clients/mcp";
++import { releaseLocksHeldBy } from "~/server/lib/browser/lock";
+ import { toggleMcpServerSchema } from "./toggleMcpServer.schema";
+ 
+ export const toggleMcpServer = protectedProcedure
+@@ -11,5 +13,9 @@ export const toggleMcpServer = protectedProcedure
+     if (existing.instance.userId !== ctx.session.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Not your instance" });
+ 
+     const updated = await db.mcpServer.update({ where: { id: input.serverId }, data: { enabled: input.enabled } });
++    if (!input.enabled) {
++      invalidateMcpClient(input.serverId);
++      await releaseLocksHeldBy(input.serverId);
++    }
+     return updated;
+   });
+diff --git a/src/server/api/routers/mcp/updateMcpServer.schema.ts b/src/server/api/routers/mcp/updateMcpServer.schema.ts
+index 1f3906c..eb0ca1c 100644
+--- a/src/server/api/routers/mcp/updateMcpServer.schema.ts
++++ b/src/server/api/routers/mcp/updateMcpServer.schema.ts
+@@ -14,11 +14,18 @@ export const updateMcpServerSchema = z.object({
+   userDataDir: z.string().max(300).nullable().optional(),
+   cdpEndpoint: z.string().max(200).nullable().optional(),
+   cdpConfirmed: z.boolean().optional(),
++  // Typed consent: must equal "ATTACH" verbatim; sets cdpConfirmed.
++  cdpConfirmPhrase: z.string().max(20).optional(),
++  // CDP ceiling — set outside the Browser tab (row overflow menu).
++  cdpAllowed: z.boolean().optional(),
+   extensionConfirmed: z.boolean().optional(),
+   headless: z.boolean().optional(),
+   noSandbox: z.boolean().optional(),
+   infraSeedEnabled: z.boolean().optional(),
+   infraSeedExcluded: z.array(z.string().max(120)).max(64).optional(),
++  // Dismiss the browser-type proposal banner. Deliberately outside the
++  // policy-keys list: no daemon impact, no version bump.
++  dismissTypeConfirmation: z.boolean().optional(),
+ });
+ 
+ export type UpdateMcpServerInput = z.infer<typeof updateMcpServerSchema>;
+diff --git a/src/server/api/routers/mcp/updateMcpServer.ts b/src/server/api/routers/mcp/updateMcpServer.ts
+index c96ac68..a251fbd 100644
+--- a/src/server/api/routers/mcp/updateMcpServer.ts
++++ b/src/server/api/routers/mcp/updateMcpServer.ts
+@@ -2,8 +2,10 @@ import { TRPCError } from "@trpc/server";
+ import { protectedProcedure } from "~/server/api/trpc";
+ import { db } from "~/server/clients/db";
+ import { encrypt } from "~/lib/crypto";
+-import { assertSafeMcpUrl } from "~/lib/mcp-url";
++import { assertSafeMcpUrl, classifyReachability } from "~/lib/mcp-url";
+ import { validateDedicatedProfileDir } from "~/server/lib/browser/profile-guard";
++import { releaseLocksHeldBy, releaseTargetIfHeldBy } from "~/server/lib/browser/lock";
++import { lockTargetFor } from "~/server/lib/browser/lock-target";
+ import { invalidateMcpClient } from "~/server/clients/mcp";
+ import { updateMcpServerSchema } from "./updateMcpServer.schema";
+ 
+@@ -16,6 +18,23 @@ export const updateMcpServer = protectedProcedure
+ 
+     const data: Record<string, unknown> = {};
+     if (input.label !== undefined) data.label = input.label;
++    // Flipping to playwright enrolls the row in daemon supervision, which
++    // only manages local children — refuse remote URLs with an actionable
++    // message instead of a child that can never start.
++    if (input.serverType === "playwright" && existing.serverType !== "playwright") {
++      let reach: string;
++      try {
++        reach = classifyReachability(existing.url);
++      } catch {
++        throw new TRPCError({ code: "BAD_REQUEST", message: "Server URL is not a valid http(s) URL." });
++      }
++      if (reach !== "loopback") {
++        throw new TRPCError({
++          code: "BAD_REQUEST",
++          message: "Browser servers must be loopback URLs — the daemon only supervises local children.",
++        });
++      }
++    }
+     if (input.url !== undefined) {
+       try {
+         assertSafeMcpUrl(input.url);
+@@ -33,6 +52,37 @@ export const updateMcpServer = protectedProcedure
+     }
+     // Policy fields: any change restarts the supervised browser via the daemon.
+     let policyTouched = false;
++    // CDP ceiling: a mode the ceiling forbids cannot be selected.
++    if (input.browserMode === "cdp" && input.cdpAllowed !== true && existing.cdpAllowed !== true) {
++      throw new TRPCError({
++        code: "FORBIDDEN",
++        message: "Live attach is not enabled for this project. Enable it outside the Browser tab first.",
++      });
++    }
++    // Typed consent: exact match sets cdpConfirmed; anything else refuses.
++    if (input.cdpConfirmPhrase !== undefined) {
++      if (input.cdpConfirmPhrase !== "ATTACH") {
++        throw new TRPCError({ code: "BAD_REQUEST", message: "Type ATTACH verbatim to confirm live attach." });
++      }
++      if (existing.cdpAllowed !== true && input.cdpAllowed !== true) {
++        throw new TRPCError({
++          code: "FORBIDDEN",
++          message: "Live attach is not enabled for this project. Enable it outside the Browser tab first.",
++        });
++      }
++      data.cdpConfirmed = true;
++      policyTouched = true;
++    }
++    // Endpoint change resets consent — re-confirmation is per-endpoint.
++    // A valid phrase in the SAME call confirms the new endpoint directly.
++    if (
++      input.cdpEndpoint !== undefined &&
++      input.cdpEndpoint !== existing.cdpEndpoint &&
++      input.cdpConfirmPhrase !== "ATTACH"
++    ) {
++      data.cdpConfirmed = false;
++      policyTouched = true;
++    }
+     if (input.userDataDir !== undefined && input.userDataDir !== null) {
+       const check = validateDedicatedProfileDir(input.userDataDir);
+       if (!check.ok) throw new TRPCError({ code: "BAD_REQUEST", message: check.message });
+@@ -46,6 +96,7 @@ export const updateMcpServer = protectedProcedure
+       "userDataDir",
+       "cdpEndpoint",
+       "cdpConfirmed",
++      "cdpAllowed",
+       "extensionConfirmed",
+       "headless",
+       "noSandbox",
+@@ -58,8 +109,42 @@ export const updateMcpServer = protectedProcedure
+       }
+     }
+     if (policyTouched) data.policyVersion = { increment: 1 };
++    if (input.dismissTypeConfirmation === true) data.needsTypeConfirmation = false;
++    if (input.serverType === "playwright") data.needsTypeConfirmation = false;
+ 
+     const updated = await db.mcpServer.update({ where: { id: input.serverId }, data });
+     invalidateMcpClient(input.serverId);
+-    return updated;
++    // Target-affecting change (mode/URL/endpoint): the project's old lease
++    // must die with the old target — never leave a stale lock the UI shows
++    // as held. Another project's lease on that target is untouched.
++    const oldTarget = lockTargetFor(existing);
++    const newTarget = lockTargetFor(updated);
++    if (oldTarget && oldTarget !== newTarget) {
++      await releaseTargetIfHeldBy(oldTarget, existing.instanceId);
++    }
++    // Leaving browser supervision releases any held lock.
++    if (input.serverType !== undefined && input.serverType !== "playwright") {
++      await releaseLocksHeldBy(input.serverId);
++    }
++
++    // Same-endpoint warning (warn, never refuse): two rows on one CDP
++    // endpoint contend for a single browser. Legitimate sharing exists,
++    // so this is advisory — the holder lock arbitrates at runtime.
++    let endpointConflictWarning: string | undefined;
++    const endpoint = (updated.cdpEndpoint ?? existing.cdpEndpoint) as string | null;
++    if (updated.browserMode === "cdp" && endpoint) {
++      const sharers = await db.mcpServer.findMany({
++        where: {
++          id: { not: input.serverId },
++          browserMode: "cdp",
++          cdpEndpoint: endpoint,
++          instance: { userId: ctx.session.user.id },
++        },
++        select: { label: true, instanceId: true },
++      });
++      if (sharers.length > 0) {
++        endpointConflictWarning = `Also attached here: ${sharers.map((s) => s.label).join(", ")}. They'll contend for one browser — use separate debug ports for separate browsers.`;
++      }
++    }
++    return { ...updated, endpointConflictWarning };
+   });
+diff --git a/src/server/clients/mcp.ts b/src/server/clients/mcp.ts
+index d7ff21a..4482fc1 100644
+--- a/src/server/clients/mcp.ts
++++ b/src/server/clients/mcp.ts
+@@ -21,6 +21,7 @@ import {
+ type CachedMcpClient = {
+   client: Client;
+   transport: StreamableHTTPClientTransport | SSEClientTransport;
++  instanceId: string;
+   connectedAt: number;
+   lastUsedAt: number;
+ };
+@@ -32,8 +33,13 @@ type McpServerRow = {
+   url: string;
+   headersEnc: string | null;
+   browserMode?: string | null;
++  cdpEndpoint?: string | null;
+   cdpConfirmed?: boolean | null;
++  cdpAllowed?: boolean | null;
+   extensionConfirmed?: boolean | null;
++  serverType?: string | null;
++  originMode?: string | null;
++  instanceId: string;
+ };
+ 
+ type McpToolWithServer = {
+@@ -232,7 +238,7 @@ async function getOrCreateMcpClient(server: McpServerRow): Promise<Client> {
+ 
+   await withTimeout(client.connect(transport as never), CONNECT_TIMEOUT_MS);
+ 
+-  clients.set(server.id, { client, transport, connectedAt: now, lastUsedAt: now });
++  clients.set(server.id, { client, transport, instanceId: server.instanceId, connectedAt: now, lastUsedAt: now });
+   return client;
+ }
+ 
+@@ -244,11 +250,14 @@ export function invalidateMcpClient(serverId: string): void {
+   }
+ }
+ 
+-export function invalidateMcpClientsForInstance(_instanceId: string): void {
+-  // Per-server cache is keyed by server.id which is cuid — we need to know which
+-  // server belongs to which instance. Instead of tracking, clear on instance-level
+-  // invalidation is best-effort: caller should pass serverIds. Fallback clears all for same instance is handled by DB layer.
+-  // For now, this is a no-op placeholder — individual server invalidation is used.
++/** Evict every cached client belonging to an instance (project-scoped). */
++export function invalidateMcpClientsForInstance(instanceId: string): void {
++  for (const [serverId, hit] of clients) {
++    if (hit.instanceId === instanceId) {
++      hit.client.close().catch(() => {});
++      clients.delete(serverId);
++    }
++  }
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -345,14 +354,32 @@ export async function getOrCreateMcpTools(
+       include: { server: true },
+     })) as unknown as McpToolWithServer[];
+ 
++    // Fail closed per row: a playwright row in allowlist mode with zero
++    // enabled allow-rules contributes no tools — even while a shared child
++    // serves its siblings. One groupBy for all candidate servers.
++    const pwServerIds = [...new Set(rows.filter((r) => r.server.serverType === "playwright").map((r) => r.mcpServerId))];
++    const ruleCounts = pwServerIds.length > 0
++      ? await db.mcpOriginRule.groupBy({
++        by: ["mcpServerId"],
++        where: { mcpServerId: { in: pwServerIds }, enabled: true, kind: "allow" },
++        _count: { id: true },
++      }).catch((): Array<{ mcpServerId: string; _count: { id: number } }> => [])
++      : [];
++    const allowCounts = new Map(ruleCounts.map((c) => [c.mcpServerId, c._count.id]));
++
+     const usable = rows.filter(
+       (r) =>
+         isReachableHere(classifyReachability(r.server.url)) &&
+         // CDP and extension modes attach to a live, possibly authenticated
+-        // browser: explicit per-server opt-in each, and never on unattended
+-        // sources. Gate by availability, not runtime rejection.
+-        (r.server.browserMode !== "cdp" || (source === "web" && r.server.cdpConfirmed === true)) &&
+-        (r.server.browserMode !== "extension" || (source === "web" && r.server.extensionConfirmed === true)),
++        // browser: explicit per-server opt-in each, ceiling-gated for CDP,
++        // and never on unattended sources. Gate by availability, not runtime
++        // rejection.
++        (r.server.browserMode !== "cdp" ||
++          (source === "web" && r.server.cdpConfirmed === true && r.server.cdpAllowed === true)) &&
++        (r.server.browserMode !== "extension" || (source === "web" && r.server.extensionConfirmed === true)) &&
++        (r.server.serverType !== "playwright" ||
++          r.server.originMode !== "allowlist" ||
++          (allowCounts.get(r.mcpServerId) ?? 0) > 0),
+     );
+ 
+     const set: ToolSet = {};
+@@ -377,6 +404,39 @@ async function callMcpTool(
+   imgCtx: { instanceId: string; chatId: string } | null,
+ ): Promise<unknown> {
+   const timeout = TOOL_TIMEOUT_OVERRIDES[row.originalName] ?? CALL_TIMEOUT_MS;
++  // Project-scoped browser lease (playwright rows only): steal-on-demand,
++  // refuse only while another project is mid-call. The in-flight marker
++  // spans the whole tool execution below (finally-block releases it).
++  let endBrowserCallFn: (() => void) | null = null;
++  if (row.server.serverType === "playwright") {
++    try {
++      const { checkBrowserLock, beginBrowserCall, endBrowserCall } = await import(
++        "~/server/lib/browser/lock"
++      );
++      const instanceId = imgCtx?.instanceId ?? row.server.instanceId;
++      const verdict = await checkBrowserLock({
++        id: row.mcpServerId,
++        instanceId,
++        label: row.server.label,
++        browserMode: row.server.browserMode,
++        url: row.server.url,
++        cdpEndpoint: row.server.cdpEndpoint ?? null,
++      });
++      if (!verdict.ok) return { isError: true as const, message: verdict.message };
++      const target = verdict.target;
++      if (target) {
++        if (!beginBrowserCall(target, instanceId, row.server.label)) {
++          return {
++            isError: true as const,
++            message: `Browser just became active for another project. Wait for that call to finish, then retry once — do not retry in a loop.`,
++          };
++        }
++        endBrowserCallFn = () => endBrowserCall(target, instanceId);
++      }
++    } catch (err) {
++      console.error("[mcp] lock check failed open", { err, serverId: row.mcpServerId });
++    }
++  }
+   try {
+     const client = await getOrCreateMcpClient(row.server);
+     const result = await withTimeout(
+@@ -391,10 +451,16 @@ async function callMcpTool(
+   } catch (err) {
+     const msg = describeError(err);
+     // Self-heal: a server restart wipes Streamable HTTP sessions, so the
+-    // cached client's session id goes stale ("Session not found/expired").
+-    // Drop the cached client and retry once with a fresh initialize instead
+-    // of wedging every tool until process restart.
+-    if (/session (not found|expired|unknown)|unknown session|invalid session/i.test(msg)) {
++    // cached client's session id goes stale ("Session not found/expired") —
++    // and a down/restarting daemon fails the cached transport outright
++    // (ECONNREFUSED/fetch failed/connection closed), wedging every tool until
++    // process restart because the failed call keeps lastUsedAt fresh. Drop the
++    // cached client and retry once with a fresh initialize in both cases.
++    if (
++      /session (not found|expired|unknown)|unknown session|invalid session|ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|fetch failed|other side (closed|disconnected)|connection (closed|reset|refused)|transport closed|network socket disconnected/i.test(
++        msg,
++      )
++    ) {
+       invalidateMcpClient(row.server.id);
+       try {
+         const client = await getOrCreateMcpClient(row.server);
+@@ -421,5 +487,7 @@ async function callMcpTool(
+       } catch {}
+     }
+     return { isError: true as const, message: `MCP ${row.server.label}/${row.originalName}: ${finalMsg}` };
++  } finally {
++    endBrowserCallFn?.();
+   }
+ }
+
+--- [untracked, new file] src/server/lib/browser/lock.ts ---
++++ b/src/server/lib/browser/lock.ts
+@@ -0,0 +1,155 @@
++import { db } from "~/server/clients/db";
++import { lockTargetFor } from "./lock-target";
++
++export { lockTargetFor };
++
++type ServerRef = {
++  id: string;
++  instanceId: string;
++  label: string;
++  browserMode?: string | null;
++  url: string;
++  cdpEndpoint?: string | null;
++};
++
++export type LockVerdict = { ok: true; target?: string } | { ok: false; message: string };
++
++/**
++ * In-flight cross-project guard: the ONLY refusal source. The API server is a
++ * single process (chat tool calls + cron execute routes), so an in-process
++ * registry is authoritative for "another project is executing right now".
++ * DB rows are leases for UI/ops; this map is the simultaneity barrier.
++ */
++const inFlight = new Map<string, Map<string, { label: string; count: number }>>();
++
++function activeOther(
++  target: string,
++  instanceId: string,
++): { instanceId: string; label: string } | null {
++  const byInstance = inFlight.get(target);
++  if (!byInstance) return null;
++  for (const [id, entry] of byInstance) {
++    if (id !== instanceId && entry.count > 0) return { instanceId: id, label: entry.label };
++  }
++  return null;
++}
++
++/** Marks a browser call as executing. false = another project is mid-call. */
++export function beginBrowserCall(target: string, instanceId: string, label: string): boolean {
++  if (activeOther(target, instanceId)) return false;
++  let byInstance = inFlight.get(target);
++  if (!byInstance) {
++    byInstance = new Map();
++    inFlight.set(target, byInstance);
++  }
++  const cur = byInstance.get(instanceId);
++  byInstance.set(instanceId, { label, count: (cur?.count ?? 0) + 1 });
++  return true;
++}
++
++export function endBrowserCall(target: string, instanceId: string): void {
++  const byInstance = inFlight.get(target);
++  if (!byInstance) return;
++  const cur = byInstance.get(instanceId);
++  if (!cur) return;
++  if (cur.count <= 1) byInstance.delete(instanceId);
++  else byInstance.set(instanceId, { label: cur.label, count: cur.count - 1 });
++  if (byInstance.size === 0) inFlight.delete(target);
++}
++
++async function inFlightRefusal(active: { instanceId: string; label: string }): Promise<string> {
++  const inst = await db.composioClawInstance
++    .findUnique({ where: { id: active.instanceId }, select: { name: true } })
++    .catch(() => null);
++  const project = inst?.name ?? "another project";
++  return `Browser is in use by ${project} / ${active.label} — a browser call is running right now. Wait for it to finish (or Release it from that project) — do not retry in a loop.`;
++}
++
++/**
++ * Project-scoped holder lease, steal-on-demand:
++ * - no lock row yet → claim (lazy; nothing exists before the first call)
++ * - same project (any row/chat) → share + heartbeat
++ * - different project → claim immediately, even if the lease is fresh; the
++ *   previous project claims back on its next call
++ * - refusal ONLY while another project is mid-call on this target
++ * - a row that holds a different target has switched modes → its old lease dies
++ * Claims are single-statement updates (last writer wins, no lost updates).
++ */
++export async function checkBrowserLock(row: ServerRef): Promise<LockVerdict> {
++  const target = lockTargetFor(row);
++  if (!target) return { ok: true };
++  const now = new Date();
++
++  const active = activeOther(target, row.instanceId);
++  if (active) return { ok: false, message: await inFlightRefusal(active) };
++
++  const existing = await db.browserLock.findUnique({ where: { target } });
++
++  // Stale-lease self-heal: this row previously held a different target
++  // (mode/URL switch between calls). Skip on the hot heartbeat path where
++  // this row provably holds this very target.
++  if (existing?.holderServerId !== row.id) {
++    const stale = await db.browserLock
++      .findMany({ where: { holderServerId: row.id, target: { not: target } }, select: { target: true } })
++      .catch(() => []);
++    if (stale.length > 0) {
++      await db.browserLock
++        .deleteMany({ where: { holderServerId: row.id, target: { in: stale.map((s) => s.target) } } })
++        .catch(() => undefined);
++    }
++  }
++
++  if (existing?.holderInstanceId === row.instanceId) {
++    const hb = await db.browserLock
++      .updateMany({ where: { target, holderInstanceId: row.instanceId }, data: { holderServerId: row.id } })
++      .catch(() => ({ count: 1 }));
++    if (hb.count === 0) {
++      // Raced a cross-project steal between read and heartbeat — take it back.
++      await db.browserLock
++        .updateMany({ where: { target }, data: { holderServerId: row.id, holderInstanceId: row.instanceId, acquiredAt: now } })
++        .catch(() => undefined);
++    }
++    return { ok: true, target };
++  }
++
++  if (!existing) {
++    try {
++      await db.browserLock.create({
++        data: { target, holderServerId: row.id, holderInstanceId: row.instanceId, acquiredAt: now },
++      });
++      return { ok: true, target };
++    } catch {
++      // Lost a concurrent create — fall through to the claim below.
++    }
++  }
++
++  await db.browserLock
++    .updateMany({
++      where: { target },
++      data: { holderServerId: row.id, holderInstanceId: row.instanceId, acquiredAt: now },
++    })
++    .catch(() => undefined);
++  return { ok: true, target };
++}
++
++/** Manual/auto release: ANY row of the holder project releases the project lease. */
++export async function releaseLocksHeldBy(serverId: string): Promise<number> {
++  const row = await db.mcpServer
++    .findUnique({ where: { id: serverId }, select: { instanceId: true } })
++    .catch(() => null);
++  if (!row) return 0;
++  return releaseLocksForInstance(row.instanceId);
++}
++
++export async function releaseLocksForInstance(instanceId: string): Promise<number> {
++  const r = await db.browserLock.deleteMany({ where: { holderInstanceId: instanceId } }).catch(() => ({ count: 0 }));
++  return r.count;
++}
++
++/** Drop one target's lease only when THIS project holds it (mode switches, row deletes). */
++export async function releaseTargetIfHeldBy(target: string, instanceId: string): Promise<number> {
++  const r = await db.browserLock
++    .deleteMany({ where: { target, holderInstanceId: instanceId } })
++    .catch(() => ({ count: 0 }));
++  return r.count;
++}
+
+--- [untracked, new file] src/server/lib/browser/lock-target.ts ---
++++ b/src/server/lib/browser/lock-target.ts
+@@ -0,0 +1,31 @@
++/**
++ * Browser lock targets — one lock per browser, never per row. Managed and
++ * extension rows sharing an MCP port contend for one child; CDP rows
++ * contend per endpoint. Two targets that share nothing never contend.
++ */
++export const LOCK_IDLE_MS = 10 * 60 * 1000;
++
++export function lockTargetFor(row: {
++  browserMode?: string | null;
++  url: string;
++  cdpEndpoint?: string | null;
++}): string | null {
++  if (row.browserMode === "cdp") {
++    if (!row.cdpEndpoint) return null;
++    return `cdp:${row.cdpEndpoint}`;
++  }
++  try {
++    const u = new URL(row.url);
++    const port = Number(u.port);
++    if (!Number.isInteger(port) || port <= 0) return null;
++    return `port:${port}`;
++  } catch {
++    return null;
++  }
++}
++
++export function describeLockAge(acquiredAt: Date, lastToolAt: Date, now = new Date()): string {
++  const heldMin = Math.max(0, Math.round((now.getTime() - acquiredAt.getTime()) / 60000));
++  const idleSec = Math.max(0, Math.round((now.getTime() - lastToolAt.getTime()) / 1000));
++  return `held ${heldMin} min, last action ${idleSec}s ago`;
++}
+
+--- [untracked, new file] src/server/api/routers/mcp/releaseBrowserLock.ts ---
++++ b/src/server/api/routers/mcp/releaseBrowserLock.ts
+@@ -0,0 +1,15 @@
++import { TRPCError } from "@trpc/server";
++import { protectedProcedure } from "~/server/api/trpc";
++import { db } from "~/server/clients/db";
++import { releaseLocksHeldBy } from "~/server/lib/browser/lock";
++import { releaseBrowserLockSchema } from "./releaseBrowserLock.schema";
++
++export const releaseBrowserLock = protectedProcedure
++  .input(releaseBrowserLockSchema)
++  .mutation(async ({ ctx, input }) => {
++    const server = await db.mcpServer.findUnique({ where: { id: input.serverId }, include: { instance: true } });
++    if (!server) throw new TRPCError({ code: "NOT_FOUND", message: "Server not found" });
++    if (server.instance.userId !== ctx.session.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Not your instance" });
++    const released = await releaseLocksHeldBy(input.serverId);
++    return { ok: true as const, released };
++  });
+
+--- [untracked, new file] src/server/api/routers/mcp/releaseBrowserLock.schema.ts ---
++++ b/src/server/api/routers/mcp/releaseBrowserLock.schema.ts
+@@ -0,0 +1,7 @@
++import { z } from "zod";
++
++export const releaseBrowserLockSchema = z.object({
++  serverId: z.string().cuid(),
++});
++
++export type ReleaseBrowserLockInput = z.infer<typeof releaseBrowserLockSchema>;
+
+--- [untracked, new file] src/server/api/routers/mcp/copyBrowserConfig.ts ---
++++ b/src/server/api/routers/mcp/copyBrowserConfig.ts
+@@ -0,0 +1,52 @@
++import { TRPCError } from "@trpc/server";
++import { protectedProcedure } from "~/server/api/trpc";
++import { db } from "~/server/clients/db";
++import { invalidateMcpClient } from "~/server/clients/mcp";
++import { copyBrowserConfigSchema } from "./copyBrowserConfig.schema";
++
++/**
++ * Promote browser POLICY from one row to another. Copies policy only —
++ * targets stay per-row: cdpEndpoint, executablePath, userDataDir,
++ * cdpConfirmed are never touched (copying Personal's :9222 onto Default
++ * would silently aim the test project at the real browser).
++ */
++const COPIED_SCALARS = ["originMode", "browserMode", "headless", "noSandbox", "infraSeedEnabled", "infraSeedExcluded"] as const;
++
++export const copyBrowserConfig = protectedProcedure
++  .input(copyBrowserConfigSchema)
++  .mutation(async ({ ctx, input }) => {
++    const [source, target] = await Promise.all([
++      db.mcpServer.findUnique({ where: { id: input.sourceServerId }, include: { instance: true } }),
++      db.mcpServer.findUnique({ where: { id: input.targetServerId }, include: { instance: true } }),
++    ]);
++    if (!source || !target) throw new TRPCError({ code: "NOT_FOUND", message: "Server not found" });
++    if (source.instance.userId !== ctx.session.user.id || target.instance.userId !== ctx.session.user.id) {
++      throw new TRPCError({ code: "FORBIDDEN", message: "Not your instance" });
++    }
++    if (source.serverType !== "playwright" || target.serverType !== "playwright") {
++      throw new TRPCError({ code: "BAD_REQUEST", message: "Both rows must be browser (Playwright) servers." });
++    }
++
++    const data: Record<string, unknown> = { policyVersion: { increment: 1 } };
++    for (const key of COPIED_SCALARS) data[key] = source[key];
++
++    const rules = await db.mcpOriginRule.findMany({ where: { mcpServerId: source.id } });
++    await db.$transaction([
++      db.mcpServer.update({ where: { id: target.id }, data }),
++      db.mcpOriginRule.deleteMany({ where: { mcpServerId: target.id } }),
++      ...rules.map((r) =>
++        db.mcpOriginRule.create({
++          data: {
++            mcpServerId: target.id,
++            pattern: r.pattern,
++            kind: r.kind,
++            origin: "manual",
++            enabled: r.enabled,
++            notes: r.notes,
++          },
++        }),
++      ),
++    ]);
++    invalidateMcpClient(target.id);
++    return { ok: true as const, copiedRules: rules.length, skippedTargets: ["cdpEndpoint", "executablePath", "userDataDir", "cdpConfirmed"] };
++  });
+
+--- [untracked, new file] src/server/api/routers/mcp/copyBrowserConfig.schema.ts ---
++++ b/src/server/api/routers/mcp/copyBrowserConfig.schema.ts
+@@ -0,0 +1,8 @@
++import { z } from "zod";
++
++export const copyBrowserConfigSchema = z.object({
++  sourceServerId: z.string().cuid(),
++  targetServerId: z.string().cuid(),
++});
++
++export type CopyBrowserConfigInput = z.infer<typeof copyBrowserConfigSchema>;
+
+--- [untracked, new file] src/server/api/routers/mcp/diffBrowserConfig.ts ---
++++ b/src/server/api/routers/mcp/diffBrowserConfig.ts
+@@ -0,0 +1,45 @@
++import { TRPCError } from "@trpc/server";
++import { protectedProcedure } from "~/server/api/trpc";
++import { db } from "~/server/clients/db";
++import { diffBrowserConfigSchema } from "./diffBrowserConfig.schema";
++
++const COMPARED = [
++  "originMode",
++  "browserMode",
++  "headless",
++  "noSandbox",
++  "infraSeedEnabled",
++  "cdpEndpoint",
++  "executablePath",
++  "userDataDir",
++  "cdpConfirmed",
++  "extensionConfirmed",
++] as const;
++
++/** Field-level diff between two browser rows — keeps test-first honest. */
++export const diffBrowserConfig = protectedProcedure
++  .input(diffBrowserConfigSchema)
++  .query(async ({ ctx, input }) => {
++    const [a, b] = await Promise.all([
++      db.mcpServer.findUnique({ where: { id: input.serverIdA }, include: { instance: true } }),
++      db.mcpServer.findUnique({ where: { id: input.serverIdB }, include: { instance: true } }),
++    ]);
++    if (!a || !b) throw new TRPCError({ code: "NOT_FOUND", message: "Server not found" });
++    if (a.instance.userId !== ctx.session.user.id || b.instance.userId !== ctx.session.user.id) {
++      throw new TRPCError({ code: "FORBIDDEN", message: "Not your instance" });
++    }
++    const rows = COMPARED.filter((f) => String(a[f] ?? "") !== String(b[f] ?? "")).map((f) => ({
++      field: f,
++      a: a[f] as unknown,
++      b: b[f] as unknown,
++    }));
++    const [rulesA, rulesB] = await Promise.all([
++      db.mcpOriginRule.findMany({ where: { mcpServerId: a.id, enabled: true }, select: { pattern: true, kind: true } }),
++      db.mcpOriginRule.findMany({ where: { mcpServerId: b.id, enabled: true }, select: { pattern: true, kind: true } }),
++    ]);
++    const setA = new Set(rulesA.map((r) => `${r.kind}:${r.pattern}`));
++    const setB = new Set(rulesB.map((r) => `${r.kind}:${r.pattern}`));
++    const onlyA = [...setA].filter((x) => !setB.has(x));
++    const onlyB = [...setB].filter((x) => !setA.has(x));
++    return { aLabel: a.label, bLabel: b.label, fields: rows, onlyA, onlyB };
++  });
+
+--- [untracked, new file] src/server/api/routers/mcp/diffBrowserConfig.schema.ts ---
++++ b/src/server/api/routers/mcp/diffBrowserConfig.schema.ts
+@@ -0,0 +1,8 @@
++import { z } from "zod";
++
++export const diffBrowserConfigSchema = z.object({
++  serverIdA: z.string().cuid(),
++  serverIdB: z.string().cuid(),
++});
++
++export type DiffBrowserConfigInput = z.infer<typeof diffBrowserConfigSchema>;
+
+--- [untracked, new file] src/server/api/routers/mcp/listBrowserRows.ts ---
++++ b/src/server/api/routers/mcp/listBrowserRows.ts
+@@ -0,0 +1,21 @@
++import { protectedProcedure } from "~/server/api/trpc";
++import { db } from "~/server/clients/db";
++import { listBrowserRowsSchema } from "./listBrowserRows.schema";
++
++/** All playwright rows across the caller's instances — source picker for copy/diff. */
++export const listBrowserRows = protectedProcedure.input(listBrowserRowsSchema).query(async ({ ctx }) => {
++  const rows = await db.mcpServer.findMany({
++    where: { serverType: "playwright", instance: { userId: ctx.session.user.id } },
++    select: {
++      id: true,
++      name: true,
++      label: true,
++      instanceId: true,
++      browserMode: true,
++      originMode: true,
++      instance: { select: { name: true } },
++    },
++    orderBy: { createdAt: "asc" },
++  });
++  return rows.map((r) => ({ ...r, instanceName: r.instance.name }));
++});
+
+--- [untracked, new file] src/server/api/routers/mcp/listBrowserRows.schema.ts ---
++++ b/src/server/api/routers/mcp/listBrowserRows.schema.ts
+@@ -0,0 +1,5 @@
++import { z } from "zod";
++
++export const listBrowserRowsSchema = z.object({});
++
++export type ListBrowserRowsInput = z.infer<typeof listBrowserRowsSchema>;
+
+--- [untracked, new file] src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-copy-config-dialog.tsx ---
++++ b/src/app/(authenticated)/dashboard/settings/_components/mcp/mcp-copy-config-dialog.tsx
+@@ -0,0 +1,94 @@
++"use client";
++
++import { useState } from "react";
++import { Loader2 } from "lucide-react";
++import { Button } from "~/components/ui/button";
++import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "~/components/ui/dialog";
++import { trpc } from "~/clients/trpc";
++
++const SKIPPED = ["cdpEndpoint", "executablePath", "userDataDir", "cdpConfirmed"];
++
++export function McpCopyConfigDialog({ serverId, instanceId }: { serverId: string; instanceId: string }) {
++  const [open, setOpen] = useState(false);
++  const [sourceId, setSourceId] = useState("");
++  const utils = trpc.useUtils();
++  const sources = trpc.mcp.listBrowserRows.useQuery({}, { enabled: open });
++  const diff = trpc.mcp.diffBrowserConfig.useQuery(
++    { serverIdA: sourceId, serverIdB: serverId },
++    { enabled: open && !!sourceId },
++  );
++  const copy = trpc.mcp.copyBrowserConfig.useMutation({
++    onSuccess: () => {
++      void utils.mcp.listMcpServers.invalidate({ instanceId });
++      setOpen(false);
++      setSourceId("");
++    },
++  });
++
++  const options = (sources.data ?? []).filter((s) => s.id !== serverId);
++
++  return (
++    <Dialog open={open} onOpenChange={setOpen}>
++      <DialogTrigger asChild>
++        <button className="flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent">
++          Copy browser config…
++        </button>
++      </DialogTrigger>
++      <DialogContent className="max-w-md">
++        <DialogHeader>
++          <DialogTitle>Copy browser config</DialogTitle>
++        </DialogHeader>
++        <div className="space-y-3">
++          <select
++            value={sourceId}
++            onChange={(e) => setSourceId(e.target.value)}
++            className="h-8 w-full rounded-md border bg-background px-2 text-xs"
++          >
++            <option value="">Copy from…</option>
++            {options.map((s) => (
++              <option key={s.id} value={s.id}>
++                {s.instanceName} / {s.label}
++              </option>
++            ))}
++          </select>
++          <p className="text-muted-foreground text-[11px]">
++            Copies policy only. Never copied: {SKIPPED.join(", ")} — targets stay per-row.
++          </p>
++          {diff.data && (
++            <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border p-2">
++              {diff.data.fields.length === 0 && diff.data.onlyA.length === 0 && diff.data.onlyB.length === 0 ? (
++                <p className="text-xs text-green-600">Identical — no drift.</p>
++              ) : (
++                <>
++                  {diff.data.fields.map((f) => (
++                    <p key={f.field} className="font-mono text-[11px]">
++                      {f.field}: <span className="text-muted-foreground">{JSON.stringify(f.a)}</span> → {JSON.stringify(f.b)}
++                    </p>
++                  ))}
++                  {diff.data.onlyA.map((r) => (
++                    <p key={`a-${r}`} className="font-mono text-[11px] text-amber-600">
++                      rule only on source: {r}
++                    </p>
++                  ))}
++                  {diff.data.onlyB.map((r) => (
++                    <p key={`b-${r}`} className="font-mono text-[11px] text-amber-600">
++                      rule only here: {r}
++                    </p>
++                  ))}
++                </>
++              )}
++            </div>
++          )}
++          {copy.error && <p className="text-destructive text-xs">{copy.error.message}</p>}
++          <Button
++            disabled={!sourceId || copy.isPending}
++            className="w-full"
++            onClick={() => void copy.mutateAsync({ sourceServerId: sourceId, targetServerId: serverId })}
++          >
++            {copy.isPending ? <Loader2 className="size-3 animate-spin" /> : "Copy policy (targets untouched)"}
++          </Button>
++        </div>
++      </DialogContent>
++    </Dialog>
++  );
++}
+

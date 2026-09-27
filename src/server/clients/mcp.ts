@@ -8,10 +8,13 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { db } from "~/server/clients/db";
 import { decrypt } from "~/lib/crypto";
 import { ingestMcpScreenshots, type McpContentBlock } from "~/server/lib/browser/mcp-images";
+import { browserTargetFor } from "~/server/lib/browser/browser-target";
+import { acquireBrowserTarget, releaseBrowserTarget } from "~/server/lib/browser/target-mutex";
 import {
-  assertSafeMcpUrl,
+  assertMcpHostResolvesGlobal,
   classifyReachability,
   isReachableHere,
+  safeRedirectFetch,
 } from "~/lib/mcp-url";
 
 // ---------------------------------------------------------------------------
@@ -21,6 +24,7 @@ import {
 type CachedMcpClient = {
   client: Client;
   transport: StreamableHTTPClientTransport | SSEClientTransport;
+  instanceId: string;
   connectedAt: number;
   lastUsedAt: number;
 };
@@ -32,8 +36,13 @@ type McpServerRow = {
   url: string;
   headersEnc: string | null;
   browserMode?: string | null;
+  cdpEndpoint?: string | null;
   cdpConfirmed?: boolean | null;
+  cdpAllowed?: boolean | null;
   extensionConfirmed?: boolean | null;
+  serverType?: string | null;
+  originMode?: string | null;
+  instanceId: string;
 };
 
 type McpToolWithServer = {
@@ -206,17 +215,19 @@ async function resolveMcpImages(
 
 async function getOrCreateMcpClient(server: McpServerRow): Promise<Client> {
   const now = Date.now();
-  const hit = clients.get(server.id);
+  // Dedication: one row per browser target, so one cached session per row.
+  const key = server.id;
+  const hit = clients.get(key);
   if (hit && now - hit.lastUsedAt < IDLE_TTL_MS) {
     hit.lastUsedAt = now;
     return hit.client;
   }
   if (hit) {
     await hit.client.close().catch(() => {});
-    clients.delete(server.id);
+    clients.delete(key);
   }
 
-  assertSafeMcpUrl(server.url);
+  await assertMcpHostResolvesGlobal(server.url, { allowLoopback: true });
   const headers: Record<string, string> | undefined = server.headersEnc
     ? (JSON.parse(await decrypt(server.headersEnc)) as Record<string, string>)
     : undefined;
@@ -224,15 +235,21 @@ async function getOrCreateMcpClient(server: McpServerRow): Promise<Client> {
   const url = new URL(server.url);
   // Streamable HTTP is default for this codebase (one connector). SSE only if URL hints legacy.
   const isSse = server.url.includes("/sse") || server.url.includes("sse=");
+  // Every network hop (incl. redirects) is re-validated against the SSRF guard.
+  const fetcher = (input: RequestInfo | URL, init?: RequestInit) =>
+    safeRedirectFetch(input, init, { allowLoopback: true });
+  const transportOpts = headers
+    ? { requestInit: { headers }, fetch: fetcher }
+    : { fetch: fetcher };
   const transport: StreamableHTTPClientTransport | SSEClientTransport = isSse
-    ? new SSEClientTransport(url)
-    : new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : undefined);
+    ? new SSEClientTransport(url, transportOpts)
+    : new StreamableHTTPClientTransport(url, transportOpts);
 
   const client = new Client({ name: "nimits-jarvis", version: "0.1.0" }, { capabilities: {} });
 
   await withTimeout(client.connect(transport as never), CONNECT_TIMEOUT_MS);
 
-  clients.set(server.id, { client, transport, connectedAt: now, lastUsedAt: now });
+  clients.set(key, { client, transport, instanceId: server.instanceId, connectedAt: now, lastUsedAt: now });
   return client;
 }
 
@@ -244,11 +261,14 @@ export function invalidateMcpClient(serverId: string): void {
   }
 }
 
-export function invalidateMcpClientsForInstance(_instanceId: string): void {
-  // Per-server cache is keyed by server.id which is cuid — we need to know which
-  // server belongs to which instance. Instead of tracking, clear on instance-level
-  // invalidation is best-effort: caller should pass serverIds. Fallback clears all for same instance is handled by DB layer.
-  // For now, this is a no-op placeholder — individual server invalidation is used.
+/** Evict every cached client belonging to an instance (project-scoped). */
+export function invalidateMcpClientsForInstance(instanceId: string): void {
+  for (const [key, hit] of clients) {
+    if (hit.instanceId === instanceId) {
+      hit.client.close().catch(() => {});
+      clients.delete(key);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,14 +365,32 @@ export async function getOrCreateMcpTools(
       include: { server: true },
     })) as unknown as McpToolWithServer[];
 
+    // Fail closed per row: a playwright row in allowlist mode with zero
+    // enabled allow-rules contributes no tools — even while a shared child
+    // serves its siblings. One groupBy for all candidate servers.
+    const pwServerIds = [...new Set(rows.filter((r) => r.server.serverType === "playwright").map((r) => r.mcpServerId))];
+    const ruleCounts = pwServerIds.length > 0
+      ? await db.mcpOriginRule.groupBy({
+        by: ["mcpServerId"],
+        where: { mcpServerId: { in: pwServerIds }, enabled: true, kind: "allow" },
+        _count: { id: true },
+      }).catch((): Array<{ mcpServerId: string; _count: { id: number } }> => [])
+      : [];
+    const allowCounts = new Map(ruleCounts.map((c) => [c.mcpServerId, c._count.id]));
+
     const usable = rows.filter(
       (r) =>
         isReachableHere(classifyReachability(r.server.url)) &&
         // CDP and extension modes attach to a live, possibly authenticated
-        // browser: explicit per-server opt-in each, and never on unattended
-        // sources. Gate by availability, not runtime rejection.
-        (r.server.browserMode !== "cdp" || (source === "web" && r.server.cdpConfirmed === true)) &&
-        (r.server.browserMode !== "extension" || (source === "web" && r.server.extensionConfirmed === true)),
+        // browser: explicit per-server opt-in each, ceiling-gated for CDP,
+        // and never on unattended sources. Gate by availability, not runtime
+        // rejection.
+        (r.server.browserMode !== "cdp" ||
+          (source === "web" && r.server.cdpConfirmed === true && r.server.cdpAllowed === true)) &&
+        (r.server.browserMode !== "extension" || (source === "web" && r.server.extensionConfirmed === true)) &&
+        (r.server.serverType !== "playwright" ||
+          r.server.originMode !== "allowlist" ||
+          (allowCounts.get(r.mcpServerId) ?? 0) > 0),
     );
 
     const set: ToolSet = {};
@@ -377,6 +415,25 @@ async function callMcpTool(
   imgCtx: { instanceId: string; chatId: string } | null,
 ): Promise<unknown> {
   const timeout = TOOL_TIMEOUT_OVERRIDES[row.originalName] ?? CALL_TIMEOUT_MS;
+  // Dedication-era concurrency (playwright rows only): one row owns the
+  // target, but one project still drives it from many chats at once — and
+  // two MCP sessions cannot share a managed profile. Serialize per target
+  // with a bounded wait instead of refusing: the only contender is this
+  // project's own other call. Released in `finally` below.
+  let releaseTarget: (() => void) | null = null;
+  if (row.server.serverType === "playwright") {
+    const target = browserTargetFor(row.server);
+    if (target) {
+      if (await acquireBrowserTarget(target)) {
+        releaseTarget = () => releaseBrowserTarget(target);
+      } else {
+        return {
+          isError: true as const,
+          message: `Browser is busy with another call. Wait for that call to finish, then retry once — do not retry in a loop.`,
+        };
+      }
+    }
+  }
   try {
     const client = await getOrCreateMcpClient(row.server);
     const result = await withTimeout(
@@ -391,10 +448,16 @@ async function callMcpTool(
   } catch (err) {
     const msg = describeError(err);
     // Self-heal: a server restart wipes Streamable HTTP sessions, so the
-    // cached client's session id goes stale ("Session not found/expired").
-    // Drop the cached client and retry once with a fresh initialize instead
-    // of wedging every tool until process restart.
-    if (/session (not found|expired|unknown)|unknown session|invalid session/i.test(msg)) {
+    // cached client's session id goes stale ("Session not found/expired") —
+    // and a down/restarting daemon fails the cached transport outright
+    // (ECONNREFUSED/fetch failed/connection closed), wedging every tool until
+    // process restart because the failed call keeps lastUsedAt fresh. Drop the
+    // cached client and retry once with a fresh initialize in both cases.
+    if (
+      /session (not found|expired|unknown)|unknown session|invalid session|ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|fetch failed|other side (closed|disconnected)|connection (closed|reset|refused)|transport closed|network socket disconnected/i.test(
+        msg,
+      )
+    ) {
       invalidateMcpClient(row.server.id);
       try {
         const client = await getOrCreateMcpClient(row.server);
@@ -421,5 +484,7 @@ async function callMcpTool(
       } catch {}
     }
     return { isError: true as const, message: `MCP ${row.server.label}/${row.originalName}: ${finalMsg}` };
+  } finally {
+    releaseTarget?.();
   }
 }

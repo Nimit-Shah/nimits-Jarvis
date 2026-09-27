@@ -36,42 +36,39 @@ const staleJobRow = z.object({
   timezone: z.string(),
 });
 
-function parseNowOverride(request: Request): Date {
-  if (env.NODE_ENV !== "development") return new Date();
-
-  const url = new URL(request.url);
-  const nowParam = url.searchParams.get("now");
-  if (!nowParam) return new Date();
-
-  const parsed = new Date(nowParam);
-  if (isNaN(parsed.getTime())) return new Date();
-
-  return parsed;
+/**
+ * Dispatch time is always the server's clock. The former `?now=` override
+ * (honored only in development) let an unauthenticated caller force-claim
+ * every scheduled job with a future date; the local cron daemon drives
+ * scheduling directly, so no HTTP caller needs this escape hatch.
+ */
+function parseNowOverride(_request: Request): Date {
+  return new Date();
 }
 
 export async function GET(request: Request) {
   // Vercel auto-injects CRON_SECRET when crons are declared in vercel.json and
   // sends `Authorization: Bearer <CRON_SECRET>` on cron-triggered requests.
-  // In dev we allow unauthenticated calls so the local trigger script works.
-  if (env.NODE_ENV !== "development") {
-    // Fail closed before the bearer comparison: if CRON_SECRET is missing
-    // (e.g. env validation was bypassed and the var was never set), the
-    // expected header would interpolate to `Bearer undefined` and accept
-    // anyone sending that literal string. Reject the request outright.
-    if (typeof env.CRON_SECRET !== "string" || env.CRON_SECRET.length === 0) {
-      return new Response("Server misconfigured: CRON_SECRET missing", {
-        status: 503,
-      });
-    }
-    const auth = request.headers.get("authorization") ?? "";
-    const expected = Buffer.from(`Bearer ${env.CRON_SECRET}`);
-    const actual = Buffer.from(auth);
-    if (
-      actual.length !== expected.length ||
-      !timingSafeEqual(actual, expected)
-    ) {
-      return new Response("Unauthorized", { status: 401 });
-    }
+  // The bearer token is enforced in EVERY environment, including development:
+  // this route is an unattended agent-trigger entrypoint, and a network-exposed
+  // dev server must not be usable to claim and dispatch scheduled jobs.
+  // Fail closed before the bearer comparison: if CRON_SECRET is missing
+  // (e.g. env validation was bypassed and the var was never set), the
+  // expected header would interpolate to `Bearer undefined` and accept
+  // anyone sending that literal string. Reject the request outright.
+  if (typeof env.CRON_SECRET !== "string" || env.CRON_SECRET.length === 0) {
+    return new Response("Server misconfigured: CRON_SECRET missing", {
+      status: 503,
+    });
+  }
+  const auth = request.headers.get("authorization") ?? "";
+  const expected = Buffer.from(`Bearer ${env.CRON_SECRET}`);
+  const actual = Buffer.from(auth);
+  if (
+    actual.length !== expected.length ||
+    !timingSafeEqual(actual, expected)
+  ) {
+    return new Response("Unauthorized", { status: 401 });
   }
 
   void consolidateMnemosyne();

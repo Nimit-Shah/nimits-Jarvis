@@ -9,6 +9,7 @@ import {
   stageRawSkill,
   ImportError,
 } from "~/server/lib/skills/import-pipeline";
+import { assertMcpHostResolvesGlobal, safeRedirectFetch } from "~/lib/mcp-url";
 import { importSkillInput } from "./importSkill.schema";
 
 /**
@@ -25,6 +26,8 @@ export const importSkill = protectedProcedure
       err instanceof ImportError
         ? new TRPCError({ code: err.code, message: err.message })
         : new TRPCError({ code: "BAD_REQUEST", message: "Fetch failed." });
+
+    await assertMcpHostResolvesGlobal(input.url);
 
     if (isGitUrl(input.url)) {
       let tmpBase: string | null = null;
@@ -48,7 +51,7 @@ export const importSkill = protectedProcedure
 
     let tmpBase: string | null = null;
     try {
-      const res = await fetch(input.url, { signal: AbortSignal.timeout(15_000) });
+      const res = await safeRedirectFetch(input.url, { signal: AbortSignal.timeout(15_000) });
       if (!res.ok) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Fetch failed: HTTP ${res.status}.` });
       }

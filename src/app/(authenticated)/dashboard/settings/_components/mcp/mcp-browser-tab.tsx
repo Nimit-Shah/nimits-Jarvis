@@ -3,6 +3,7 @@
 import { Switch } from "~/components/ui/switch";
 import { Button } from "~/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~/components/ui/tooltip";
+import { useState } from "react";
 import { trpc } from "~/clients/trpc";
 import { McpDomainsTable } from "./mcp-domains-table";
 import { McpCdnSheet } from "./mcp-cdn-sheet";
@@ -27,6 +28,8 @@ export function McpBrowserTab({ server, instanceId }: { server: McpServerSummary
   const utils = trpc.useUtils();
   const refresh = () => void utils.mcp.listMcpServers.invalidate({ instanceId });
   const update = trpc.mcp.updateMcpServer.useMutation({ onSuccess: refresh });
+  const [attachPhrase, setAttachPhrase] = useState("");
+  const [copied, setCopied] = useState(false);
 
   return (
     <div className="space-y-3 p-3">
@@ -50,8 +53,67 @@ export function McpBrowserTab({ server, instanceId }: { server: McpServerSummary
           >
             Live Comet
           </Button>
+          <Button
+            variant={server.browserMode === "cdp" ? "default" : "outline"}
+            size="sm"
+            className="h-6 text-[11px]"
+            onClick={() => void update.mutateAsync({ serverId: server.id, browserMode: "cdp" })}
+          >
+            Live attach
+          </Button>
         </div>
       </div>
+      {server.browserMode === "cdp" && (
+        <div className="space-y-1.5 rounded-md border p-2">
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground shrink-0 text-[11px]">CDP endpoint</span>
+            <input
+              defaultValue={server.cdpEndpoint ?? ""}
+              placeholder="http://127.0.0.1:9222"
+              className="h-6 min-w-0 flex-1 rounded-md border px-2 font-mono text-[11px]"
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v !== (server.cdpEndpoint ?? "")) void update.mutateAsync({ serverId: server.id, cdpEndpoint: v || null });
+              }}
+            />
+          </div>
+          {!server.cdpConfirmed ? (
+            <div className="flex items-center gap-2">
+              <input
+                value={attachPhrase}
+                onChange={(e) => setAttachPhrase(e.target.value)}
+                placeholder='Type ATTACH to confirm live attach'
+                className="h-6 min-w-0 flex-1 rounded-md border px-2 font-mono text-[11px]"
+              />
+              <Button
+                size="sm"
+                className="h-6 shrink-0 text-[11px]"
+                disabled={attachPhrase !== "ATTACH" || update.isPending}
+                onClick={() => {
+                  setAttachPhrase("");
+                  void update.mutateAsync({ serverId: server.id, cdpConfirmPhrase: "ATTACH" });
+                }}
+              >
+                Confirm
+              </Button>
+            </div>
+          ) : (
+            <p className="text-[11px] text-green-600">Live attach confirmed — web chats only, never cron or Telegram.</p>
+          )}
+          <button
+            className="text-muted-foreground text-[11px] hover:underline"
+            onClick={() => {
+              const cmd = `/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9223 --user-data-dir="$HOME/Library/Application Support/NimitsJarvis/browser/cdp-throwaway"`;
+              void navigator.clipboard.writeText(cmd).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              });
+            }}
+          >
+            {copied ? "Copied — run in a terminal" : "Copy throwaway-Chromium launch command (:9223)"}
+          </button>
+        </div>
+      )}
       {server.browserMode === "extension" && (
         <div className="space-y-1.5 rounded-md border border-amber-200 bg-amber-50 p-2">
           <label className="flex items-start gap-2 text-[11px]">
@@ -95,9 +157,21 @@ export function McpBrowserTab({ server, instanceId }: { server: McpServerSummary
         />
         <span className="text-muted-foreground text-[11px]">{server.noSandbox ? "Off" : "On"}</span>
       </div>
+      {server.sharedPort && server.sharedPort.participants.length > 0 && (
+        <p className="text-muted-foreground text-[11px]">
+          Shared browser on :{server.sharedPort.port} with{" "}
+          {server.sharedPort.participants.map((p) => `${p.instanceName} / ${p.label}`).join(", ")} — one child serves all rows.
+        </p>
+      )}
+      {server.sandboxOverridden && (
+        <p className="text-[11px] text-amber-600">Sandbox kept on: another row on this port requires it (strictest wins).</p>
+      )}
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium">Site access</span>
         <Hint text="Open: no restriction. Allowlist: only listed sites plus shared CDNs." />
+        {server.browserMode === "cdp" && (
+          <span className="text-muted-foreground text-[10px]">Under Live attach, the allowlist covers what Jarvis fetches, not tabs you open yourself.</span>
+        )}
         <div className="ml-auto flex gap-1">
           <Button
             variant={server.originMode === "open" ? "default" : "outline"}
@@ -138,6 +212,12 @@ export function McpBrowserTab({ server, instanceId }: { server: McpServerSummary
             excluded={server.infraSeedExcluded}
           />
           <McpDomainsTable serverId={server.id} instanceId={instanceId} />
+          {server.siblingBlocks && server.siblingBlocks.length > 0 && (
+            <p className="text-[11px] text-amber-600">
+              Also blocked for you via {[...new Set(server.siblingBlocks.map((b) => b.byLabel))].join(", ")}:{" "}
+              {server.siblingBlocks.map((b) => b.pattern).join(", ")}
+            </p>
+          )}
         </div>
       )}
     </div>

@@ -12,6 +12,7 @@ import { McpReachabilityBadge } from "./mcp-reachability-badge";
 import { McpStatusBadge } from "./mcp-status-badge";
 import { McpServerToolsTab } from "./mcp-server-tools-tab";
 import { McpBrowserTab } from "./mcp-browser-tab";
+import { McpCopyConfigDialog } from "./mcp-copy-config-dialog";
 import type { McpServerSummary } from "./mcp-server-type";
 
 export function McpServerRow({ server, instanceId }: { server: McpServerSummary; instanceId: string }) {
@@ -21,6 +22,9 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
   const sync = trpc.mcp.syncMcpTools.useMutation({ onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }) });
   const test = trpc.mcp.testMcpServer.useMutation({ onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }) });
   const del = trpc.mcp.deleteMcpServer.useMutation({ onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }) });
+  const setType = trpc.mcp.updateMcpServer.useMutation({
+    onSuccess: () => void utils.mcp.listMcpServers.invalidate({ instanceId }),
+  });
 
   const dimmed = !server.reachableHere;
   const isPlaywright = server.serverType === "playwright";
@@ -52,9 +56,9 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
                 </TooltipContent>
               )}
             </Tooltip>
-          </TooltipProvider>
-        )}
-        <span className="text-muted-foreground whitespace-nowrap text-xs">
+            </TooltipProvider>
+          )}
+          <span className="text-muted-foreground whitespace-nowrap text-xs">
           {server.enabledToolCount}/{server.toolCount} tools
         </span>
         <Popover>
@@ -78,6 +82,32 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
             >
               {test.isPending ? <Loader2 className="mr-2 size-3 animate-spin" /> : null} Test connection
             </button>
+            <div className="my-1 border-t" />
+            <p className="px-2 pt-1 text-[10px] text-muted-foreground">Server type</p>
+            {(["generic", "playwright"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => void setType.mutateAsync({ serverId: server.id, serverType: t })}
+                disabled={setType.isPending || server.serverType === t}
+                className="flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent disabled:opacity-60"
+              >
+                {t === "playwright" ? "Browser (Playwright)" : "Generic"}
+                {server.serverType === t && <span className="ml-auto text-[10px] text-muted-foreground">current</span>}
+              </button>
+            ))}
+            {isPlaywright && (
+              <>
+                <div className="my-1 border-t" />
+                <div className="flex items-center rounded-sm px-2 py-1.5 text-xs">
+                  <span className="flex-1">Allow live attach</span>
+                  <Switch
+                    checked={server.cdpAllowed ?? false}
+                    onCheckedChange={(v) => void setType.mutateAsync({ serverId: server.id, cdpAllowed: v })}
+                  />
+                </div>
+                <McpCopyConfigDialog serverId={server.id} instanceId={instanceId} />
+              </>
+            )}
             <button
               onClick={() => void del.mutateAsync({ serverId: server.id })}
               className="text-destructive flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent"
@@ -88,6 +118,26 @@ export function McpServerRow({ server, instanceId }: { server: McpServerSummary;
         </Popover>
         <Switch checked={server.enabled} onCheckedChange={(v) => void toggle.mutateAsync({ serverId: server.id, enabled: v })} />
       </div>
+      {server.needsTypeConfirmation && server.serverType === "generic" && (
+        <div className="mx-3 mb-2 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5">
+          <p className="flex-1 text-[11px]">This looks like a browser server. Set type to Browser (Playwright)?</p>
+          <Button
+            size="sm"
+            className="h-6 text-[11px]"
+            disabled={setType.isPending}
+            onClick={() => void setType.mutateAsync({ serverId: server.id, serverType: "playwright" })}
+          >
+            Confirm
+          </Button>
+          <button
+            onClick={() => void setType.mutateAsync({ serverId: server.id, dismissTypeConfirmation: true })}
+            className="text-muted-foreground text-[11px] hover:underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {setType.error && <p className="text-destructive px-3 pb-2 text-xs">{setType.error.message}</p>}
       {expanded && (
         <div className="border-t px-3 pt-2">
           <Tabs defaultValue="tools">

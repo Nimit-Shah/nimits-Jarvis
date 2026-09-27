@@ -1,6 +1,7 @@
 import { TRPCError } from "@trpc/server";
 import { protectedProcedure } from "~/server/api/trpc";
 import { db } from "~/server/clients/db";
+import { invalidateMcpClient } from "~/server/clients/mcp";
 import { toggleMcpServerSchema } from "./toggleMcpServer.schema";
 
 export const toggleMcpServer = protectedProcedure
@@ -11,5 +12,8 @@ export const toggleMcpServer = protectedProcedure
     if (existing.instance.userId !== ctx.session.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Not your instance" });
 
     const updated = await db.mcpServer.update({ where: { id: input.serverId }, data: { enabled: input.enabled } });
+    if (!input.enabled) {
+      invalidateMcpClient(input.serverId);
+    }
     return updated;
   });

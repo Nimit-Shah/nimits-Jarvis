@@ -1,6 +1,7 @@
 import { TRPCError } from "@trpc/server";
 import { protectedProcedure } from "~/server/api/trpc";
 import { db } from "~/server/clients/db";
+import { invalidateMcpClient } from "~/server/clients/mcp";
 import { deleteMcpOriginRuleSchema } from "./deleteMcpOriginRule.schema";
 
 export const deleteMcpOriginRule = protectedProcedure
@@ -12,5 +13,6 @@ export const deleteMcpOriginRule = protectedProcedure
 
     await db.mcpOriginRule.delete({ where: { id: input.ruleId } });
     await db.mcpServer.update({ where: { id: rule.mcpServerId }, data: { policyVersion: { increment: 1 } } });
+    invalidateMcpClient(rule.mcpServerId);
     return { ok: true as const };
   });

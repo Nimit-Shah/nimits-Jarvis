@@ -6,7 +6,14 @@ import { AddMcpServerDialog } from "./add-mcp-server-dialog";
 import { McpServersPanelSkeleton } from "./mcp-servers-panel.skeleton";
 
 export function McpServersPanel({ instanceId }: { instanceId: string }) {
-  const { data: servers, isLoading } = trpc.mcp.listMcpServers.useQuery({ instanceId });
+  // 5s polling keeps the three status stores coherent: `status` (reachability),
+  // `policyApplying` (policyVersion vs appliedPolicyVersion), and the
+  // project-scoped browser lock chip. Without it, chips go stale after
+  // another project claims/releases the browser.
+  const { data: servers, isLoading } = trpc.mcp.listMcpServers.useQuery(
+    { instanceId },
+    { refetchInterval: 5_000 },
+  );
 
   if (isLoading) return <McpServersPanelSkeleton />;
 

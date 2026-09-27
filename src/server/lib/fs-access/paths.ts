@@ -41,35 +41,53 @@ export type SafePath =
   | { ok: false; code: PathErrorCode; message: string };
 
 // Any path segment equal to one of these is refused.
+// Matching is case-insensitive (macOS APFS is case-preserving but
+// case-insensitive, so ~/.SSH and ~/.ssh are the same directory).
 // Build/dependency/vcs noise first (node_modules, .git, ...) — listing or
 // searching them wastes thousands of entries and syscalls. Also: an unbounded
 // walk of a home directory is only tractable because these are denied.
 const DENY_SEGMENTS = new Set([
-  ".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", "Keychains",
+  ".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", "keychains",
   "node_modules", ".git", "__pycache__", ".venv", ".next",
-  ".pnpm-store", ".Trash", "dist", "build",
+  ".pnpm-store", ".trash", "dist", "build",
 ]);
 
-// Exact file names refused anywhere in the tree.
+// Exact file names refused anywhere in the tree (matched case-insensitively —
+// covers .Renviron/.renviron, .NETRC/.netrc, .SSH/config, ...).
 const DENY_BASENAMES = new Set([
   ".env", ".env.local", ".env.production", ".netrc", ".git-credentials",
   ".npmrc", "credentials", "id_rsa", "id_ed25519", "id_ecdsa",
+  ".curlrc", ".wgetrc", ".envrc", ".pgpass", ".my.cnf",
+  ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile",
+  ".profile", ".gitconfig", ".zsh_history", ".bash_history",
+  ".pypirc", ".renviron",
 ]);
 
 const DENY_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".keychain", ".keychain-db"];
 
-// Home-relative subtrees refused wholesale.
+// Home-relative subtrees refused wholesale (matched case-insensitively).
 // Library as a whole tree is deliberate: TCC databases, speech transcripts,
 // accountd records — no user-facing task needs the agent browsing there.
 // (If ever needed, add an explicit allowSystemPaths arg gated on full mode.)
 // .jarvis: daemon working root (browser profiles hold live session cookies,
 // specs mirror launch state) — never model-readable.
+// Credential stores: 1Password (.config/op), sops/age identity keys, rclone
+// cloud tokens, pip/pypi tokens, pass (~/.password-store), Azure CLI tokens,
+// and the Firefox password database (~/.mozilla).
 const DENY_SUBPATHS = [
-  "Library",
+  "library",
   ".jarvis",
   ".config/gh",
   ".config/gcloud",
+  ".config/op",
+  ".config/sops",
+  ".config/age",
+  ".config/rclone",
+  ".config/pip",
+  ".password-store",
+  ".azure",
   ".local/share/keyrings",
+  ".mozilla",
 ];
 
 export function expandTilde(p: string): string {
@@ -135,13 +153,14 @@ function isDenied(real: string, root: string, skillRefs?: SkillRefAccess): boole
   }
   const rel = real.startsWith(root + sep) ? real.slice(root.length + 1) : "";
   const segments = real.split(sep);
-  if (segments.some((s) => DENY_SEGMENTS.has(s))) return true;
+  if (segments.some((s) => DENY_SEGMENTS.has(s.toLowerCase()))) return true;
   const base = basename(real);
-  if (DENY_BASENAMES.has(base)) return true;
-  if (base.startsWith(".env.")) return true;
   const lower = base.toLowerCase();
+  if (DENY_BASENAMES.has(lower)) return true;
+  if (lower.startsWith(".env.")) return true;
   if (DENY_EXTENSIONS.some((e) => lower.endsWith(e))) return true;
-  if (rel && DENY_SUBPATHS.some((d) => rel === d || rel.startsWith(d + sep))) return true;
+  const lowerRel = rel.toLowerCase();
+  if (lowerRel && DENY_SUBPATHS.some((d) => lowerRel === d || lowerRel.startsWith(d + sep))) return true;
   return false;
 }
 

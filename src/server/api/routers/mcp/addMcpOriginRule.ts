@@ -1,6 +1,7 @@
 import { TRPCError } from "@trpc/server";
 import { protectedProcedure } from "~/server/api/trpc";
 import { db } from "~/server/clients/db";
+import { invalidateMcpClient } from "~/server/clients/mcp";
 import { normalizeOriginPattern } from "~/server/lib/browser/origins";
 import { addMcpOriginRuleSchema } from "./addMcpOriginRule.schema";
 
@@ -18,5 +19,6 @@ export const addMcpOriginRule = protectedProcedure
       update: { enabled: true, notes: input.notes },
     });
     await db.mcpServer.update({ where: { id: input.serverId }, data: { policyVersion: { increment: 1 } } });
+    invalidateMcpClient(input.serverId);
     return rule;
   });

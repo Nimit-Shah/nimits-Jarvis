@@ -42,7 +42,7 @@ export const env = createEnv({
       .int()
       .positive()
       .default(20),
-    RATE_LIMIT_FAIL_MODE: z.enum(["open", "closed"]).default("open"),
+    RATE_LIMIT_FAIL_MODE: z.enum(["open", "closed"]).default("closed"),
     RATE_LIMIT_ENABLED: booleanString.default(true),
 
     // Cron auth. Required in production so unauthenticated callers can't hit
@@ -102,11 +102,11 @@ export const env = createEnv({
     RATE_LIMIT_CRON_PER_DAY: process.env.RATE_LIMIT_CRON_PER_DAY,
     RATE_LIMIT_TELEGRAM_PER_MINUTE:
       process.env.RATE_LIMIT_TELEGRAM_PER_MINUTE,
-    RATE_LIMIT_FAIL_MODE:
-      process.env.RATE_LIMIT_FAIL_MODE ??
-      ((process.env.NODE_ENV ?? "development") === "development"
-        ? "open"
-        : "closed"),
+    // Fail CLOSED whenever the operator has not made an explicit choice.
+    // A silently unlimited agent entrypoint (chat/telegram/cron) under Redis
+    // absence/outage is a cost and abuse amplifier; unlimited is opt-in via
+    // RATE_LIMIT_FAIL_MODE=open (e.g. desktop runs without Redis).
+    RATE_LIMIT_FAIL_MODE: process.env.RATE_LIMIT_FAIL_MODE ?? "closed",
     RATE_LIMIT_ENABLED: process.env.RATE_LIMIT_ENABLED,
     CRON_SECRET: process.env.CRON_SECRET,
     OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL,
